@@ -258,7 +258,7 @@ struct Params {
     minDist: f32,
     count: f32,
     size: f32,
-    opacity: f32,
+    opacity: f32, // corresponds to baseColorOpacity
     numTypes: f32,
     time: f32,
     growth: f32,
@@ -288,7 +288,8 @@ fn vs_main(
     let h = max(1.0, params.height);
     let aspect = w / h;
 
-    let sizeNDC = (params.size / w) * 2.0;
+    // Expand particle size slightly for glow
+    let sizeNDC = (params.size * 1.5 / w) * 2.0;
     
     // Standard Quad
     var offsets = array<vec2f, 6>(
@@ -319,23 +320,41 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
+    // Distance squared from center in UV space (-1 to 1)
     let d2 = dot(input.uv, input.uv); 
     
+    // Discard outside circle to avoid drawing transparent pixels in depth-less pipeline (optional opt)
     if (d2 > 1.0) {
-        return vec4f(0.0, 0.0, 0.0, 0.0);
+        return vec4f(0.0);
     }
     
-    let core = exp(-8.0 * d2);
-    let halo = exp(-2.0 * d2);
-    let intensity = max(core, halo * 0.5);
-    
-    let edgeFade = 1.0 - smoothstep(0.85, 1.0, d2);
-    let alpha = intensity * edgeFade * params.opacity;
+    let dist = sqrt(d2);
 
-    let whiteness = smoothstep(0.5, 1.0, core);
-    let finalRgb = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteness * 0.4);
+    // --- High Quality Glow & Core ---
+    // Core: Sharper gaussian for the "body" of the particle
+    let core = exp(-6.0 * d2);
     
-    return vec4f(finalRgb * alpha, alpha);
+    // Halo: Wider, softer gaussian for the glow
+    let halo = exp(-2.0 * d2) * 0.3;
+    
+    // Combine for rich intensity
+    let rawIntensity = core + halo;
+
+    // --- Anti-aliased Edge ---
+    // Smoothly fade out the very edge of the quad circle (last 10% radius)
+    let edgeAlpha = 1.0 - smoothstep(0.9, 1.0, dist);
+    
+    // Apply Global Opacity Setting
+    let finalAlpha = rawIntensity * edgeAlpha * params.opacity;
+
+    // --- Color Dynamics ---
+    // Boost the center towards white to simulate brightness/hotness
+    let whiteCore = smoothstep(0.8, 1.0, core);
+    let finalRgb = mix(input.color.rgb, vec3f(1.0), whiteCore * 0.5);
+
+    // --- Output Premultiplied Alpha ---
+    // WebGPU blending states (add, one-minus-src-alpha) generally expect premultiplied output
+    return vec4f(finalRgb * finalAlpha, finalAlpha);
 }
 `;
 
