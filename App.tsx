@@ -16,7 +16,7 @@ const App: React.FC = () => {
   const [colors, setColors] = useState<ColorDefinition[]>(DEFAULT_COLORS);
   
   const [isPaused, setIsPaused] = useState(false);
-  const [isMutating, setIsMutating] = useState(false); // Default off to let user enjoy initial chaos
+  const [isMutating, setIsMutating] = useState(true); // Default ON for learning
   const [mutationRate, setMutationRate] = useState(0.05); 
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
