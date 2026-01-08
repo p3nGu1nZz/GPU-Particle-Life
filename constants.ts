@@ -25,7 +25,7 @@ const generateColors = (count: number): ColorDefinition[] => {
     for (let i = 0; i < count; i++) {
         const golden_ratio_conjugate = 0.618033988749895;
         const hue = (i * golden_ratio_conjugate * 360) % 360;
-        const { r, g, b } = hslToRgb(hue, 95, 55);
+        const { r, g, b } = hslToRgb(hue, 95, 60); // Slightly brighter L for visibility
         colors.push({ 
             r, g, b, 
             name: rgbToHex(r, g, b)
@@ -37,13 +37,13 @@ const generateColors = (count: number): ColorDefinition[] => {
 export const DEFAULT_COLORS: ColorDefinition[] = generateColors(64);
 
 export const DEFAULT_PARAMS: SimulationParams = {
-    particleCount: 16000,
-    friction: 0.82,     
+    particleCount: 12000, // Reduced slightly for guaranteed smoothness on init
+    friction: 0.50,       // Lower friction = More flow/motion
     dt: 0.02,       
-    rMax: 0.1,          
-    forceFactor: 0.4,   
+    rMax: 0.15,           // Increased interaction radius to find neighbors easier
+    forceFactor: 0.5,     // Stronger forces to break static clumps
     minDistance: 0.01,  
-    particleSize: 2.0,  
+    particleSize: 4.0,    // Larger size to fix "blocky" look
     trails: false,
     dpiScale: 1.0,
     gpuPreference: 'high-performance',
@@ -51,15 +51,18 @@ export const DEFAULT_PARAMS: SimulationParams = {
     baseColorOpacity: 0.8,
     numTypes: 64, 
     growth: false,      
-    temperature: 1.0,   // Default thermal energy to prevent freezing
+    temperature: 1.5,     // Higher temp to shake particles out of lattice
     mouseInteractionRadius: 0.3,
     mouseInteractionForce: 5.0, 
 };
 
-// Generate random rules so the matrix isn't black on start
+// Generate random rules with a good mix of attraction/repulsion
 const generateRandomRules = (size: number): RuleMatrix => {
     return Array(size).fill(0).map(() => 
-        Array(size).fill(0).map(() => (Math.random() * 2 - 1) * 0.5) 
+        Array(size).fill(0).map(() => {
+            // Mix of -1 to 1, with a slight bias towards small values to avoid instant explosion
+            return (Math.random() * 2 - 1) * 0.8;
+        }) 
     );
 };
 

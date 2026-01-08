@@ -53,12 +53,10 @@ struct Params {
 @group(0) @binding(2) var<uniform> params: Params;
 
 const BLOCK_SIZE = 256u;
-const MAX_TYPES = 64u; // Must match MAX_RULE_TEXTURE_SIZE in TS
 
 // Shared memory for optimized N-Body
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
-// Optimization: Store types as u32 to avoid repeated casting/rounding in hot loop
-var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
+var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
 
 // Pseudo-random hash for noise
 fn hash(p: vec2f) -> f32 {
@@ -104,22 +102,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var newColor = myColor; 
     var localDensity = 0.0; 
 
-    // --- Optimization: Rule Caching ---
-    // Instead of performing a texture fetch for every interaction (N^2),
-    // we pre-load the rule row for 'myType' into private registers (N*Types).
-    // This moves the bottleneck from L1 Cache/Texture Units to ALU/Registers.
-    var myRules: array<f32, 64>;
-    let numTypes = u32(params.numTypes);
-    
-    for (var t = 0u; t < MAX_TYPES; t++) {
-        if (t < numTypes) {
-             // Coordinate: (column=t, row=myType)
-             myRules[t] = textureLoad(rulesTex, vec2u(t, myType), 0).r;
-        } else {
-             myRules[t] = 0.0;
-        }
-    }
-
     // --- Mouse Interaction ---
     if (params.mouseType != 0.0) {
         let mousePos = vec2f(params.mouseX, params.mouseY);
@@ -140,11 +122,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
             tile_pos[local_id.x] = p.pos;
-            // Optimization: Cast to u32 once here, instead of N times in loop
-            tile_type[local_id.x] = u32(round(p.color)); 
+            tile_color[local_id.x] = p.color;
         } else {
             tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
-            tile_type[local_id.x] = 0u;
+            tile_color[local_id.x] = 0.0;
         }
 
         workgroupBarrier(); 
@@ -159,7 +140,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 d = d - 2.0 * round(d / 2.0);
                 let d2 = dot(d, d);
 
-                // Optimization: Branching here is efficient as spatial locality usually means groups mostly take/skip together
                 if (d2 > 0.000001 && d2 < rMaxSq) {
                     let invDist = inverseSqrt(d2);
                     let dist = d2 * invDist; 
@@ -172,15 +152,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                         if (growthEnabled && dist < 0.02) {
                              let t = floor(params.time * 2.0); 
                              let randVal = hash(vec2f(f32(j) + t, f32(index)));
-                             if (randVal < 0.01) { 
-                                 // Cast back to f32 for storage
-                                 newColor = f32(tile_type[j]); 
-                             }
+                             if (randVal < 0.01) { newColor = tile_color[j]; }
                         }
                     } else {
-                        // Optimization: Register Array Lookup
-                        let otherType = tile_type[j]; 
-                        let ruleVal = myRules[otherType];
+                        let otherType = u32(round(tile_color[j]));
+                        
+                        // Optimized Texture Lookup
+                        // Texture is r8snorm, so .r returns f32 in [-1.0, 1.0]
+                        // Coordinate: (column, row) -> (otherType, myType)
+                        let ruleVal = textureLoad(rulesTex, vec2u(otherType, myType), 0).r;
 
                         let strength = 1.0 - abs(dist - mid) * rangeFactor;
                         f = ruleVal * strength;
@@ -307,7 +287,8 @@ fn vs_main(
     let aspect = w / h;
 
     // Expand particle size slightly for glow
-    let sizeNDC = (params.size * 1.5 / w) * 2.0;
+    // Increased multiplier from 1.5 to 2.0 to give more room for the soft edge
+    let sizeNDC = (params.size * 2.0 / w) * 2.0;
     
     // Standard Quad
     var offsets = array<vec2f, 6>(
@@ -341,11 +322,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     // Distance squared from center in UV space (-1 to 1)
     let d2 = dot(input.uv, input.uv); 
     
-    // Discard outside circle to avoid drawing transparent pixels in depth-less pipeline
-    if (d2 > 1.0) {
-        discard;
-    }
-    
     let dist = sqrt(d2);
 
     // --- High Quality Glow & Core ---
@@ -364,12 +340,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     
     // Apply Global Opacity Setting
     let finalAlpha = rawIntensity * edgeAlpha * params.opacity;
-
-    // --- Optimization: Early Discard ---
-    // If pixel is invisible, don't write to framebuffer (saves blend ops)
-    if (finalAlpha < 0.005) {
-        discard;
-    }
 
     // --- Color Dynamics ---
     // Boost the center towards white to simulate brightness/hotness

@@ -16,7 +16,7 @@ const App: React.FC = () => {
   const [colors, setColors] = useState<ColorDefinition[]>(DEFAULT_COLORS);
   
   const [isPaused, setIsPaused] = useState(false);
-  const [isMutating, setIsMutating] = useState(true); 
+  const [isMutating, setIsMutating] = useState(false); // Default off to let user enjoy initial chaos
   const [mutationRate, setMutationRate] = useState(0.05); 
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
@@ -68,21 +68,6 @@ const App: React.FC = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeGpuPreference]); 
-
-  // Adaptive Time Stepping Logic
-  useEffect(() => {
-      // Adjust dt based on performance to keep physics stable
-      // If FPS drops, we might want to increase dt slightly or decrease it to prevent tunneling
-      // Here, we maintain a baseline but ensure it doesn't get too wild
-      if (fps > 0) {
-          const targetDt = DEFAULT_PARAMS.dt;
-          // Simple safeguard: if FPS is very low, don't let dt explode or simulation explodes
-          // If FPS is high (60+), keep standard dt
-          
-          // Actually, let's keep dt constant for determinism, but maybe adjust only if heavily lagging
-          // For this specific request, we just monitor it.
-      }
-  }, [fps]);
 
   // Update logic when Color count changes
   useEffect(() => {
@@ -140,115 +125,47 @@ const App: React.FC = () => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
 
-  // --- Adaptive Physics & Enhanced Matrix Evolution ---
+  // --- Natural Drift / Mutation Evolution ---
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
-      // Slowed down to 200ms to reduce visual "wave" artifacts
       const evolutionInterval = setInterval(() => {
-          
-          let totalMagnitude = 0;
-          let totalCells = 0;
-          
           setRules(prevRules => {
               const size = prevRules.length;
               const nextRules = prevRules.map(row => [...row]);
               
-              for(let i = 0; i < size; i++) {
-                  for(let j = 0; j < size; j++) {
-                      
-                      let neighborSum = 0;
-                      let count = 0;
-                      
-                      // Convolution (3x3)
-                      for(let di = -1; di <= 1; di++) {
-                          for(let dj = -1; dj <= 1; dj++) {
-                              if (di === 0 && dj === 0) continue;
-                              
-                              const ni = (i + di + size) % size;
-                              const nj = (j + dj + size) % size;
-                              
-                              const weight = (Math.abs(di) + Math.abs(dj) === 1) ? 1.0 : 0.7;
-                              neighborSum += prevRules[ni][nj] * weight;
-                              count += weight;
-                          }
-                      }
-                      
-                      const neighborAvg = neighborSum / count;
-                      const current = prevRules[i][j];
-                      
-                      // Reaction-Diffusion logic
-                      const diffusion = (neighborAvg - current) * 0.1;
-                      const reaction = (current - current * current * current) * 0.05;
-                      
-                      let mutation = 0;
-                      
-                      // Spontaneous Generation Logic
-                      // If the area is effectively "dead" (near zero), boost mutation significantly
-                      // to allow life to restart from a cleared matrix.
-                      let effectiveMutationChance = mutationRate * 0.05;
-                      
-                      if (Math.abs(current) < 0.05 && Math.abs(neighborAvg) < 0.05) {
-                          // Boost chance in the void
-                          effectiveMutationChance = Math.max(0.02, mutationRate * 0.5); 
-                      }
+              // Only mutate a small subset of rules each tick to keep stability
+              const mutationsPerTick = Math.max(1, Math.floor(size * size * 0.01));
 
-                      if (Math.random() < effectiveMutationChance) {
-                          // Stronger mutation kick
-                          mutation = (Math.random() - 0.5) * 0.8;
-                      }
-
-                      let target = current + diffusion + reaction + mutation;
-
-                      // Decay (Entropy) - prevents runaway saturation, but kept low to allow growth
-                      target -= current * 0.005; 
-
-                      // Negative feedback from high local energy
-                      if (Math.abs(neighborAvg) > 0.4) {
-                           target -= neighborAvg * 0.1; 
-                      }
-
-                      const lerpSpeed = 0.1; 
-                      nextRules[i][j] = current + (target - current) * lerpSpeed;
-                      nextRules[i][j] = Math.max(-1, Math.min(1, nextRules[i][j]));
-                      
-                      totalMagnitude += Math.abs(nextRules[i][j]);
-                      totalCells++;
-                  }
+              for (let k = 0; k < mutationsPerTick; k++) {
+                  const i = Math.floor(Math.random() * size);
+                  const j = Math.floor(Math.random() * size);
+                  
+                  // Random Walk / Drift
+                  // Small change: -0.05 to +0.05 multiplied by rate
+                  const delta = (Math.random() - 0.5) * mutationRate * 2.0;
+                  
+                  let val = nextRules[i][j] + delta;
+                  
+                  // Soft clamp
+                  if (val > 1.0) val = 1.0;
+                  if (val < -1.0) val = -1.0;
+                  
+                  nextRules[i][j] = val;
               }
+              
               return nextRules;
           });
-          
-          if (totalCells > 0) {
-              const avgMagnitude = totalMagnitude / totalCells;
-              
-              // Only adjust force if it's drifting significantly
-              const baseForce = DEFAULT_PARAMS.forceFactor;
-              let targetForce = baseForce;
-
-              // If matrix is very hot (strong forces), lower the global multiplier
-              // If matrix is cold (weak forces), boost it
-              if (avgMagnitude > 0.3) targetForce = baseForce * 0.8;
-              if (avgMagnitude < 0.1) targetForce = baseForce * 1.5;
-
-              // Gentle lerp
-              if (Math.abs(targetForce - params.forceFactor) > 0.01) {
-                  setParams(p => ({
-                      ...p,
-                      forceFactor: p.forceFactor + (targetForce - p.forceFactor) * 0.05
-                  }));
-              }
-          }
-
-      }, 200); // 200ms interval for stability
+      }, 100); 
 
       return () => clearInterval(evolutionInterval);
-  }, [isMutating, isPaused, mutationRate, params.forceFactor]);
+  }, [isMutating, isPaused, mutationRate]);
 
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;
-    const newRules = Array(num).fill(0).map((_, y) => 
-         Array(num).fill(0).map((_, x) => Math.sin(x * 0.1) * Math.cos(y * 0.1) + (Math.random() - 0.5))
+    // Generate new random rules -1 to 1
+    const newRules = Array(num).fill(0).map(() => 
+         Array(num).fill(0).map(() => (Math.random() * 2 - 1))
     );
     setRules(newRules);
   }, [colors.length]);
