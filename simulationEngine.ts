@@ -48,18 +48,15 @@ struct Params {
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
-// Change rules binding to u32 array for packed snorm8 reading
-@group(0) @binding(1) var<storage, read> rules: array<u32>; 
+// Use Texture for Rules Lookup (r8snorm gives free normalization from -128..127 to -1.0..1.0)
+@group(0) @binding(1) var rulesTex: texture_2d<f32>; 
 @group(0) @binding(2) var<uniform> params: Params;
 
 const BLOCK_SIZE = 256u;
-const MAX_COLORS = 64u;
 
-// Shared memory for optimized N-Body and Rules lookup
+// Shared memory for optimized N-Body
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
-// 64x64 = 4096 bytes. Packed into 1024 u32s.
-var<workgroup> shared_rules: array<u32, 1024>; 
 
 // Pseudo-random hash for noise
 fn hash(p: vec2f) -> f32 {
@@ -90,29 +87,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let rMinInv = 1.0 / safeRMin;
     let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
-
-    let numTypes = u32(params.numTypes);
     
-    // --- SHARED MEMORY LOADING START ---
-    // Cooperatively load the packed rules matrix into shared memory
-    // Matrix size in u32s = (numTypes * numTypes + 3) / 4. 
-    // We just load the whole allocated max size or up to needed size.
-    // Safe to load up to capacity of shared array or total rules buffer size.
-    // We'll load based on numTypes^2 bytes.
-    
-    let totalRuleBytes = numTypes * numTypes;
-    let totalRuleWords = (totalRuleBytes + 3u) / 4u;
-    let lid = local_id.x;
-    
-    // Each thread loads chunks of the rule matrix
-    for (var i = lid; i < totalRuleWords; i += BLOCK_SIZE) {
-        if (i < 1024u) { // Safety check for array bounds
-            shared_rules[i] = rules[i];
-        }
-    }
-    
-    workgroupBarrier(); // Ensure rules are loaded before N-Body loop
-    // --- SHARED MEMORY LOADING END ---
+    // No need to load rules into shared memory anymore; Texture Cache handles it.
 
     var myPos = vec2f(0.0);
     var myColor = 0.0;
@@ -144,14 +120,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
     // --- Tiled N-Body Calculation ---
     for (var i = 0u; i < particleCount; i += BLOCK_SIZE) {
-        let tile_idx = i + lid;
+        let tile_idx = i + local_id.x;
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
-            tile_pos[lid] = p.pos;
-            tile_color[lid] = p.color;
+            tile_pos[local_id.x] = p.pos;
+            tile_color[local_id.x] = p.color;
         } else {
-            tile_pos[lid] = vec2f(-1000.0, -1000.0);
-            tile_color[lid] = 0.0;
+            tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
+            tile_color[local_id.x] = 0.0;
         }
 
         workgroupBarrier(); 
@@ -183,19 +159,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                     } else {
                         let otherType = u32(round(tile_color[j]));
                         
-                        // Optimized Shared Memory Lookup
-                        // Index in bytes
-                        let ruleIdx = myType * numTypes + otherType;
-                        let wordIdx = ruleIdx / 4u;
-                        let byteIdx = ruleIdx % 4u;
-                        
-                        let packedVal = shared_rules[wordIdx];
-                        // Unpack 4 snorm8 values (-1.0 to 1.0)
-                        let unpacked = unpack4x8snorm(packedVal);
-                        
-                        // Select the correct component
-                        // Note: unpack4x8snorm result order matches byte order (little endian)
-                        let ruleVal = unpacked[byteIdx]; 
+                        // Optimized Texture Lookup
+                        // Texture is r8snorm, so .r returns f32 in [-1.0, 1.0]
+                        // Coordinate: (column, row) -> (otherType, myType)
+                        let ruleVal = textureLoad(rulesTex, vec2u(otherType, myType), 0).r;
 
                         let strength = 1.0 - abs(dist - mid) * rangeFactor;
                         f = ruleVal * strength;
@@ -207,28 +174,59 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         workgroupBarrier();
     }
 
-    // --- Adaptive Physics Implementation ---
+    // --- Adaptive Physics Implementation (Thermostat & Jamming) ---
     if (index < particleCount) {
-        let densityFactor = smoothstep(5.0, 30.0, localDensity);
-        let viscosity = mix(params.friction, params.friction * 0.8, densityFactor);
-        let adaptiveTemp = params.temperature * (1.0 + densityFactor * 0.5);
-        let seed = myPos + vec2f(params.time, f32(index) * 0.01);
-        let thermalForce = rand2(seed) * adaptiveTemp;
+        var p = particles[index]; // Create mutable copy
+
+        // 1. Calculate Local Pressure (Jamming potential)
+        // Values > 30.0 indicate high crowding/solid-like state
+        let pressure = smoothstep(5.0, 40.0, localDensity);
         
-        force *= (1.0 - densityFactor * 0.3);
+        // 2. Dynamic Viscosity (Jamming)
+        // In dense regions, particles "rub" together more, increasing effective drag.
+        // params.friction is a retention factor (0.9 means keep 90% velocity).
+        // Higher pressure -> Lower retention -> Higher Drag.
+        let dynamicViscosity = mix(params.friction, params.friction * 0.6, pressure);
+        
+        // 3. Statistical Mechanics Thermostat
+        // We calculate kinetic energy to regulate temperature dynamically.
+        let speed = length(p.vel);
+        let kineticEnergy = 0.5 * speed * speed;
+        
+        // Phase Transition Logic:
+        // High density regions ("solids") need HIGHER temperature to melt/flow.
+        // Low density regions ("gas") need LOWER temperature to condense/form structures.
+        let targetTemp = params.temperature * (1.0 + pressure * 2.0);
+        
+        // Feedback Loop:
+        // If particle has high KE, add less noise (cool down).
+        // If particle has low KE, add more noise (heat up).
+        // This prevents explosions and keeps the system active.
+        let energyDeficit = max(0.0, targetTemp - kineticEnergy);
+        
+        // Scale thermal force by the deficit
+        // Use a time-variant seed to ensure true Brownian motion
+        let seed = myPos + vec2f(params.time * 100.0, f32(index) * 0.123);
+        let thermalForce = rand2(seed) * sqrt(energyDeficit) * 0.5;
+        
         force += thermalForce;
 
+        // Force Limiter (Safety)
         let fLen = length(force);
-        let maxForce = 20.0; 
+        let maxForce = 50.0; 
         if (fLen > maxForce) {
             force = (force / fLen) * maxForce;
         }
 
-        var p = particles[index];
-        p.vel = (p.vel + force * params.dt) * viscosity;
+        // Symplectic Euler Integration
+        p.vel += force * params.dt;
+        p.vel *= dynamicViscosity; // Apply dynamic drag
         p.pos += p.vel * params.dt;
-        p.color = newColor; 
+        
+        // Boundary Wrapping
         p.pos = p.pos - 2.0 * round(p.pos / 2.0);
+        
+        p.color = newColor; 
         particles[index] = p;
     }
 }
@@ -353,7 +351,8 @@ export class SimulationEngine {
     
     private particleBuffer: GPUBuffer | null = null;
     private paramsBuffer: GPUBuffer | null = null;
-    private rulesBuffer: GPUBuffer | null = null;
+    // Changed: rulesBuffer is now rulesTexture
+    private rulesTexture: GPUTexture | null = null;
     private colorBuffer: GPUBuffer | null = null;
     
     private renderTarget: GPUTexture | null = null;
@@ -384,6 +383,9 @@ export class SimulationEngine {
     private mouseX: number = 0;
     private mouseY: number = 0;
     private mouseInteractionType: number = 0; 
+    
+    // Rules Texture Config
+    private readonly MAX_RULE_TEXTURE_SIZE = 64;
 
     constructor(canvas: HTMLCanvasElement, onFpsUpdate?: (fps: number) => void) {
         this.canvas = canvas;
@@ -438,7 +440,7 @@ export class SimulationEngine {
         this.resize(this.canvas.clientWidth || window.innerWidth, this.canvas.clientHeight || window.innerHeight);
 
         this.createParticleBuffer();
-        this.createRulesBuffer(rules);
+        this.createRulesTexture(rules);
         this.createParamsBuffer(params);
         this.createColorBuffer(colors);
 
@@ -501,6 +503,10 @@ export class SimulationEngine {
             this.renderTarget.destroy();
             this.renderTarget = null;
         }
+        if (this.rulesTexture) {
+            this.rulesTexture.destroy();
+            this.rulesTexture = null;
+        }
     }
 
     private createParticleBuffer() {
@@ -523,33 +529,45 @@ export class SimulationEngine {
         this.particleBuffer.unmap();
     }
 
-    private createRulesBuffer(rules: RuleMatrix) {
+    private createRulesTexture(rules: RuleMatrix) {
         if (!this.device) return;
+
+        // Ensure texture exists
+        if (!this.rulesTexture) {
+            this.rulesTexture = this.device.createTexture({
+                size: [this.MAX_RULE_TEXTURE_SIZE, this.MAX_RULE_TEXTURE_SIZE],
+                format: 'r8snorm', // Signed normalized 8-bit (-1.0 to 1.0)
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+            });
+        }
         
-        // Optimize: Pack rules into 8-bit Snorm (signed normalized)
-        // This reduces bandwidth and allows caching larger matrices in shared memory.
+        this.uploadRulesToTexture(rules);
+    }
+
+    private uploadRulesToTexture(rules: RuleMatrix) {
+        if (!this.device || !this.rulesTexture) return;
+
         const numTypes = rules.length;
-        const size = numTypes * numTypes;
-        // Pad to multiple of 4 bytes for u32 alignment
-        const paddedSize = Math.ceil(size / 4) * 4;
-        const data = new Int8Array(paddedSize);
-        
-        for(let i=0; i<numTypes; i++) {
-            for(let j=0; j<numTypes; j++) {
-                // rules[i][j] is -1.0 to 1.0. Quantize to -127..127
-                let val = Math.max(-1, Math.min(1, rules[i][j]));
-                // 127 is safe max for int8
-                data[i * numTypes + j] = Math.round(val * 127);
+        // Align rows to 256 bytes for writeTexture
+        const bytesPerRow = 256; 
+        const bufferSize = bytesPerRow * this.MAX_RULE_TEXTURE_SIZE;
+        const paddedData = new Int8Array(bufferSize);
+
+        for (let row = 0; row < numTypes; row++) {
+            const rowOffset = row * bytesPerRow;
+            for (let col = 0; col < numTypes; col++) {
+                // Quantize -1.0..1.0 to -127..127
+                let val = Math.max(-1, Math.min(1, rules[row][col]));
+                paddedData[rowOffset + col] = Math.round(val * 127);
             }
         }
 
-        this.rulesBuffer = this.device.createBuffer({
-            size: data.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            mappedAtCreation: true,
-        });
-        new Int8Array(this.rulesBuffer.getMappedRange()).set(data);
-        this.rulesBuffer.unmap();
+        this.device.queue.writeTexture(
+            { texture: this.rulesTexture },
+            paddedData,
+            { bytesPerRow: bytesPerRow },
+            { width: this.MAX_RULE_TEXTURE_SIZE, height: this.MAX_RULE_TEXTURE_SIZE }
+        );
     }
 
     private createColorBuffer(colors: ColorDefinition[]) {
@@ -608,13 +626,13 @@ export class SimulationEngine {
     }
 
     private updateBindGroups() {
-        if (!this.device || !this.computePipeline || !this.pipelineAdditive || !this.particleBuffer) return;
+        if (!this.device || !this.computePipeline || !this.pipelineAdditive || !this.particleBuffer || !this.rulesTexture) return;
 
         this.computeBindGroup = this.device.createBindGroup({
             layout: this.computePipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.particleBuffer } },
-                { binding: 1, resource: { buffer: this.rulesBuffer } },
+                { binding: 1, resource: this.rulesTexture.createView() },
                 { binding: 2, resource: { buffer: this.paramsBuffer } },
             ],
         });
@@ -680,26 +698,8 @@ export class SimulationEngine {
     }
 
     public updateRules(rules: RuleMatrix) {
-        if (!this.device) return;
-        
-        // Re-pack rules on update
-        const numTypes = rules.length;
-        const size = numTypes * numTypes;
-        const paddedSize = Math.ceil(size / 4) * 4;
-        const data = new Int8Array(paddedSize);
-        for(let i=0; i<numTypes; i++) {
-            for(let j=0; j<numTypes; j++) {
-                let val = Math.max(-1, Math.min(1, rules[i][j]));
-                data[i * numTypes + j] = Math.round(val * 127);
-            }
-        }
-
-        if (this.rulesBuffer && this.rulesBuffer.size !== data.byteLength) {
-            this.createRulesBuffer(rules);
-            this.updateBindGroups();
-        } else if (this.rulesBuffer) {
-            this.device.queue.writeBuffer(this.rulesBuffer, 0, data);
-        }
+        if (!this.device || !this.rulesTexture) return;
+        this.uploadRulesToTexture(rules);
     }
 
     public resize(width: number, height: number) {
