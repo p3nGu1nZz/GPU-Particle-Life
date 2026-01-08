@@ -76,6 +76,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
     let rMax = params.rMax;
     let rMaxSq = rMax * rMax; // Pre-calculate square for optimization
+    let rMaxInv = 1.0 / rMax; // Pre-calculate reciprocal
     let rMin = params.minDist;
     // Ensure rMin isn't too close to zero to avoid division issues
     let safeRMin = max(0.001, rMin);
@@ -101,7 +102,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     
     // --- CACHE OPTIMIZATION START ---
     // Pre-load the specific rule row for this particle's type into a private array (register cache).
-    // This avoids accessing the global storage buffer 'rules' inside the hot N-body loop.
     var typeRules: array<f32, 64>;
     let ruleRowOffset = myType * numTypes;
     
@@ -162,14 +162,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 d = d - 2.0 * round(d / 2.0);
                 
                 // --- OPTIMIZATION: Distance Squared Check ---
-                // Avoid sqrt() for particles that are too far away.
                 let d2 = dot(d, d);
 
                 if (d2 > 0.000001 && d2 < rMaxSq) {
-                    let dist = sqrt(d2);
+                    // Fast inverse square root optimization
+                    let invDist = inverseSqrt(d2);
+                    let dist = d2 * invDist; // effectively sqrt(d2)
                     
-                    // Accumulate Local Density (used for adaptive physics)
-                    localDensity += (1.0 - dist / rMax);
+                    // Accumulate Local Density (using multiplication instead of division)
+                    localDensity += (1.0 - dist * rMaxInv);
 
                     var f = 0.0;
                     if (dist < safeRMin) {
@@ -194,7 +195,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                         let strength = 1.0 - abs(dist - mid) * rangeFactor;
                         f = ruleVal * strength;
                     }
-                    force += (d / dist) * f * baseForceFactor;
+                    
+                    // Optimization: Use invDist to avoid division in force vector normalization
+                    // Force = Direction * Magnitude
+                    // Direction = d / dist = d * invDist
+                    // Force = (d * invDist) * f * baseForceFactor
+                    force += d * (invDist * f * baseForceFactor);
                 }
             }
         }
@@ -207,22 +213,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         let densityFactor = smoothstep(5.0, 30.0, localDensity);
 
         // 1. Adaptive Friction (Viscosity)
-        // As density increases, friction increases (velocity dampening becomes stronger)
         let viscosity = mix(params.friction, params.friction * 0.8, densityFactor);
 
         // 2. Adaptive Temperature
-        // High density areas generate "pressure heat" -> more noise to break up clumps
         let adaptiveTemp = params.temperature * (1.0 + densityFactor * 0.5);
         let seed = myPos + vec2f(params.time, f32(index) * 0.01);
         let thermalForce = rand2(seed) * adaptiveTemp;
         
         // 3. Pressure Damping
-        // If density is very high, reduce the effective total force to prevent explosions
         force *= (1.0 - densityFactor * 0.3);
 
         force += thermalForce;
 
-        // Force Clamping to prevent jitter/explosion
+        // Force Clamping
         let fLen = length(force);
         let maxForce = 20.0; 
         if (fLen > maxForce) {
@@ -757,30 +760,55 @@ export class SimulationEngine {
         computePass.dispatchWorkgroups(Math.ceil(this.particleCount / 256));
         computePass.end();
 
-        const shouldClear = this.textureNeedsClear || !this.trailsEnabled;
-        const renderPass = commandEncoder.beginRenderPass({
-            colorAttachments: [{
-                view: this.renderTarget.createView(),
-                clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-                loadOp: shouldClear ? 'clear' : 'load',
-                storeOp: 'store',
-            }],
-        });
+        const currentTexture = this.context.getCurrentTexture();
         
-        this.textureNeedsClear = false;
         const pipeline = this.blendMode === 'normal' ? this.pipelineNormal! : this.pipelineAdditive!;
         const bindGroup = this.blendMode === 'normal' ? this.renderBindGroupNormal! : this.renderBindGroupAdditive!;
-        renderPass.setPipeline(pipeline);
-        renderPass.setBindGroup(0, bindGroup);
-        renderPass.draw(6, this.particleCount);
-        renderPass.end();
 
-        const currentTexture = this.context.getCurrentTexture();
-        commandEncoder.copyTextureToTexture(
-            { texture: this.renderTarget },
-            { texture: currentTexture },
-            [this.canvas.width, this.canvas.height]
-        );
+        // RENDER OPTIMIZATION: Branch logic based on trails requirement
+        if (this.trailsEnabled) {
+             // Trails enabled: Render to intermediate texture (load previous frame), then copy to screen
+            const shouldClear = this.textureNeedsClear;
+            this.textureNeedsClear = false;
+
+            const renderPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: this.renderTarget.createView(),
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                    loadOp: shouldClear ? 'clear' : 'load',
+                    storeOp: 'store',
+                }],
+            });
+            
+            renderPass.setPipeline(pipeline);
+            renderPass.setBindGroup(0, bindGroup);
+            renderPass.draw(6, this.particleCount);
+            renderPass.end();
+
+            commandEncoder.copyTextureToTexture(
+                { texture: this.renderTarget },
+                { texture: currentTexture },
+                [this.canvas.width, this.canvas.height]
+            );
+        } else {
+            // Trails disabled (High Performance): Render directly to swap chain with clear
+            const renderPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: currentTexture.createView(),
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            });
+
+            renderPass.setPipeline(pipeline);
+            renderPass.setBindGroup(0, bindGroup);
+            renderPass.draw(6, this.particleCount);
+            renderPass.end();
+
+            // If we switch back to trails later, ensure the texture is cleared first
+            this.textureNeedsClear = true;
+        }
 
         this.device.queue.submit([commandEncoder.finish()]);
 
