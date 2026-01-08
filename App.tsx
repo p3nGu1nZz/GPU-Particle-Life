@@ -177,18 +177,33 @@ const App: React.FC = () => {
                       const neighborAvg = neighborSum / count;
                       const current = prevRules[i][j];
                       
+                      // Reaction-Diffusion logic
                       const diffusion = (neighborAvg - current) * 0.1;
-                      const reaction = (current - current * current * current) * 0.02;
+                      const reaction = (current - current * current * current) * 0.05;
                       
                       let mutation = 0;
-                      if (Math.random() < mutationRate * 0.01) {
-                          mutation = (Math.random() - 0.5) * 0.5;
+                      
+                      // Spontaneous Generation Logic
+                      // If the area is effectively "dead" (near zero), boost mutation significantly
+                      // to allow life to restart from a cleared matrix.
+                      let effectiveMutationChance = mutationRate * 0.05;
+                      
+                      if (Math.abs(current) < 0.05 && Math.abs(neighborAvg) < 0.05) {
+                          // Boost chance in the void
+                          effectiveMutationChance = Math.max(0.02, mutationRate * 0.5); 
+                      }
+
+                      if (Math.random() < effectiveMutationChance) {
+                          // Stronger mutation kick
+                          mutation = (Math.random() - 0.5) * 0.8;
                       }
 
                       let target = current + diffusion + reaction + mutation;
 
-                      target -= current * 0.01;
+                      // Decay (Entropy) - prevents runaway saturation, but kept low to allow growth
+                      target -= current * 0.005; 
 
+                      // Negative feedback from high local energy
                       if (Math.abs(neighborAvg) > 0.4) {
                            target -= neighborAvg * 0.1; 
                       }
