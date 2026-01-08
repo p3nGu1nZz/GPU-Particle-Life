@@ -48,13 +48,18 @@ struct Params {
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
-@group(0) @binding(1) var<storage, read> rules: array<f32>; 
+// Change rules binding to u32 array for packed snorm8 reading
+@group(0) @binding(1) var<storage, read> rules: array<u32>; 
 @group(0) @binding(2) var<uniform> params: Params;
 
 const BLOCK_SIZE = 256u;
+const MAX_COLORS = 64u;
 
+// Shared memory for optimized N-Body and Rules lookup
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
+// 64x64 = 4096 bytes. Packed into 1024 u32s.
+var<workgroup> shared_rules: array<u32, 1024>; 
 
 // Pseudo-random hash for noise
 fn hash(p: vec2f) -> f32 {
@@ -75,18 +80,39 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let particleCount = u32(params.count);
 
     let rMax = params.rMax;
-    let rMaxSq = rMax * rMax; // Pre-calculate square for optimization
-    let rMaxInv = 1.0 / rMax; // Pre-calculate reciprocal
+    let rMaxSq = rMax * rMax; 
+    let rMaxInv = 1.0 / rMax; 
     let rMin = params.minDist;
-    // Ensure rMin isn't too close to zero to avoid division issues
     let safeRMin = max(0.001, rMin);
     
-    let range = max(0.0001, rMax - safeRMin); 
     let mid = (rMax + safeRMin) * 0.5;
-    let rangeFactor = 2.0 / range; 
+    let rangeFactor = 2.0 / max(0.0001, rMax - safeRMin); 
     let rMinInv = 1.0 / safeRMin;
     let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
+
+    let numTypes = u32(params.numTypes);
+    
+    // --- SHARED MEMORY LOADING START ---
+    // Cooperatively load the packed rules matrix into shared memory
+    // Matrix size in u32s = (numTypes * numTypes + 3) / 4. 
+    // We just load the whole allocated max size or up to needed size.
+    // Safe to load up to capacity of shared array or total rules buffer size.
+    // We'll load based on numTypes^2 bytes.
+    
+    let totalRuleBytes = numTypes * numTypes;
+    let totalRuleWords = (totalRuleBytes + 3u) / 4u;
+    let lid = local_id.x;
+    
+    // Each thread loads chunks of the rule matrix
+    for (var i = lid; i < totalRuleWords; i += BLOCK_SIZE) {
+        if (i < 1024u) { // Safety check for array bounds
+            shared_rules[i] = rules[i];
+        }
+    }
+    
+    workgroupBarrier(); // Ensure rules are loaded before N-Body loop
+    // --- SHARED MEMORY LOADING END ---
 
     var myPos = vec2f(0.0);
     var myColor = 0.0;
@@ -97,57 +123,35 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         myColor = p.color;
     }
 
-    let numTypes = i32(params.numTypes);
-    let myType = i32(round(myColor));
-    
-    // --- CACHE OPTIMIZATION START ---
-    // Pre-load the specific rule row for this particle's type into a private array (register cache).
-    var typeRules: array<f32, 64>;
-    let ruleRowOffset = myType * numTypes;
-    
-    // Unrolled copy (WGSL loop bounds must be uniform or constant ideally, but this works)
-    for (var k = 0; k < 64; k++) {
-        if (k < numTypes) {
-            typeRules[k] = rules[ruleRowOffset + k];
-        } else {
-            typeRules[k] = 0.0;
-        }
-    }
-    // --- CACHE OPTIMIZATION END ---
-
+    let myType = u32(round(myColor));
     var force = vec2f(0.0, 0.0);
     var newColor = myColor; 
-    
-    // Adaptive Physics Accumulator
     var localDensity = 0.0; 
 
     // --- Mouse Interaction ---
     if (params.mouseType != 0.0) {
         let mousePos = vec2f(params.mouseX, params.mouseY);
         var dm = myPos - mousePos;
-        
-        // Wrap mouse distance (so mouse affects particles across the edge)
         dm = dm - 2.0 * round(dm / 2.0);
-        
         let distM = length(dm);
         let mouseRadius = 0.4;
         
         if (distM < mouseRadius) {
-            let mForce = (1.0 - distM / mouseRadius) * 5.0; // Strong force
+            let mForce = (1.0 - distM / mouseRadius) * 5.0; 
             force += (dm / (distM + 0.001)) * mForce * params.mouseType;
         }
     }
 
     // --- Tiled N-Body Calculation ---
     for (var i = 0u; i < particleCount; i += BLOCK_SIZE) {
-        let tile_idx = i + local_id.x;
+        let tile_idx = i + lid;
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
-            tile_pos[local_id.x] = p.pos;
-            tile_color[local_id.x] = p.color;
+            tile_pos[lid] = p.pos;
+            tile_color[lid] = p.color;
         } else {
-            tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
-            tile_color[local_id.x] = 0.0;
+            tile_pos[lid] = vec2f(-1000.0, -1000.0);
+            tile_color[lid] = 0.0;
         }
 
         workgroupBarrier(); 
@@ -160,46 +164,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 let otherPos = tile_pos[j];
                 var d = otherPos - myPos;
                 d = d - 2.0 * round(d / 2.0);
-                
-                // --- OPTIMIZATION: Distance Squared Check ---
                 let d2 = dot(d, d);
 
                 if (d2 > 0.000001 && d2 < rMaxSq) {
-                    // Fast inverse square root optimization
                     let invDist = inverseSqrt(d2);
-                    let dist = d2 * invDist; // effectively sqrt(d2)
-                    
-                    // Accumulate Local Density (using multiplication instead of division)
+                    let dist = d2 * invDist; 
                     localDensity += (1.0 - dist * rMaxInv);
 
                     var f = 0.0;
                     if (dist < safeRMin) {
-                        // Repulsion force
                         let relDist = dist * rMinInv;
-                        // Smooth but strong repulsion curve
                         f = -4.0 * (1.0 - relDist); 
-                        
-                        // Growth logic
                         if (growthEnabled && dist < 0.02) {
                              let t = floor(params.time * 2.0); 
                              let randVal = hash(vec2f(f32(j) + t, f32(index)));
                              if (randVal < 0.01) { newColor = tile_color[j]; }
                         }
                     } else {
-                        let otherType = i32(round(tile_color[j]));
+                        let otherType = u32(round(tile_color[j]));
                         
-                        // Optimized Lookup using private cache
-                        let safeType = clamp(otherType, 0, numTypes - 1);
-                        let ruleVal = typeRules[safeType]; 
+                        // Optimized Shared Memory Lookup
+                        // Index in bytes
+                        let ruleIdx = myType * numTypes + otherType;
+                        let wordIdx = ruleIdx / 4u;
+                        let byteIdx = ruleIdx % 4u;
+                        
+                        let packedVal = shared_rules[wordIdx];
+                        // Unpack 4 snorm8 values (-1.0 to 1.0)
+                        let unpacked = unpack4x8snorm(packedVal);
+                        
+                        // Select the correct component
+                        // Note: unpack4x8snorm result order matches byte order (little endian)
+                        let ruleVal = unpacked[byteIdx]; 
 
                         let strength = 1.0 - abs(dist - mid) * rangeFactor;
                         f = ruleVal * strength;
                     }
-                    
-                    // Optimization: Use invDist to avoid division in force vector normalization
-                    // Force = Direction * Magnitude
-                    // Direction = d / dist = d * invDist
-                    // Force = (d * invDist) * f * baseForceFactor
                     force += d * (invDist * f * baseForceFactor);
                 }
             }
@@ -209,23 +209,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
     // --- Adaptive Physics Implementation ---
     if (index < particleCount) {
-        // Normalize density roughly based on typical neighborhood
         let densityFactor = smoothstep(5.0, 30.0, localDensity);
-
-        // 1. Adaptive Friction (Viscosity)
         let viscosity = mix(params.friction, params.friction * 0.8, densityFactor);
-
-        // 2. Adaptive Temperature
         let adaptiveTemp = params.temperature * (1.0 + densityFactor * 0.5);
         let seed = myPos + vec2f(params.time, f32(index) * 0.01);
         let thermalForce = rand2(seed) * adaptiveTemp;
         
-        // 3. Pressure Damping
         force *= (1.0 - densityFactor * 0.3);
-
         force += thermalForce;
 
-        // Force Clamping
         let fLen = length(force);
         let maxForce = 20.0; 
         if (fLen > maxForce) {
@@ -331,27 +323,20 @@ fn vs_main(
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let d2 = dot(input.uv, input.uv); 
     
-    // Instead of discard, we can just return transparent
     if (d2 > 1.0) {
         return vec4f(0.0, 0.0, 0.0, 0.0);
     }
     
-    // Enhanced Visuals: "Glowing Orb"
     let core = exp(-8.0 * d2);
     let halo = exp(-2.0 * d2);
     let intensity = max(core, halo * 0.5);
     
-    // Anti-aliasing
     let edgeFade = 1.0 - smoothstep(0.85, 1.0, d2);
-    
-    // Final alpha
     let alpha = intensity * edgeFade * params.opacity;
 
-    // Hot Core Coloring
     let whiteness = smoothstep(0.5, 1.0, core);
     let finalRgb = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteness * 0.4);
     
-    // Pre-multiplied Alpha Output
     return vec4f(finalRgb * alpha, alpha);
 }
 `;
@@ -540,13 +525,30 @@ export class SimulationEngine {
 
     private createRulesBuffer(rules: RuleMatrix) {
         if (!this.device) return;
-        const flat = new Float32Array(rules.flat());
+        
+        // Optimize: Pack rules into 8-bit Snorm (signed normalized)
+        // This reduces bandwidth and allows caching larger matrices in shared memory.
+        const numTypes = rules.length;
+        const size = numTypes * numTypes;
+        // Pad to multiple of 4 bytes for u32 alignment
+        const paddedSize = Math.ceil(size / 4) * 4;
+        const data = new Int8Array(paddedSize);
+        
+        for(let i=0; i<numTypes; i++) {
+            for(let j=0; j<numTypes; j++) {
+                // rules[i][j] is -1.0 to 1.0. Quantize to -127..127
+                let val = Math.max(-1, Math.min(1, rules[i][j]));
+                // 127 is safe max for int8
+                data[i * numTypes + j] = Math.round(val * 127);
+            }
+        }
+
         this.rulesBuffer = this.device.createBuffer({
-            size: flat.byteLength,
+            size: data.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true,
         });
-        new Float32Array(this.rulesBuffer.getMappedRange()).set(flat);
+        new Int8Array(this.rulesBuffer.getMappedRange()).set(data);
         this.rulesBuffer.unmap();
     }
 
@@ -679,12 +681,24 @@ export class SimulationEngine {
 
     public updateRules(rules: RuleMatrix) {
         if (!this.device) return;
-        const flat = new Float32Array(rules.flat());
-        if (this.rulesBuffer && this.rulesBuffer.size !== flat.byteLength) {
+        
+        // Re-pack rules on update
+        const numTypes = rules.length;
+        const size = numTypes * numTypes;
+        const paddedSize = Math.ceil(size / 4) * 4;
+        const data = new Int8Array(paddedSize);
+        for(let i=0; i<numTypes; i++) {
+            for(let j=0; j<numTypes; j++) {
+                let val = Math.max(-1, Math.min(1, rules[i][j]));
+                data[i * numTypes + j] = Math.round(val * 127);
+            }
+        }
+
+        if (this.rulesBuffer && this.rulesBuffer.size !== data.byteLength) {
             this.createRulesBuffer(rules);
             this.updateBindGroups();
         } else if (this.rulesBuffer) {
-            this.device.queue.writeBuffer(this.rulesBuffer, 0, flat);
+            this.device.queue.writeBuffer(this.rulesBuffer, 0, data);
         }
     }
 
