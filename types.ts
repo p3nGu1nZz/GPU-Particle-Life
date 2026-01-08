@@ -16,6 +16,7 @@ export interface SimulationParams {
     blendMode: 'additive' | 'normal';
     baseColorOpacity: number;
     numTypes: number; // Dynamic number of particle types
+    growth: boolean; // Biological growth/infection mechanic
 }
 
 export interface WorkerMessage {

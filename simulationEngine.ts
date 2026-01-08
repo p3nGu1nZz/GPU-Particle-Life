@@ -35,7 +35,8 @@ struct Params {
     size: f32,
     opacity: f32,
     numTypes: f32,
-    pad2: f32,
+    time: f32,     // For randomness
+    growth: f32,   // Boolean flag (1.0 or 0.0)
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -49,6 +50,11 @@ const BLOCK_SIZE = 256u;
 
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
+
+// Pseudo-random generator
+fn hash(p: vec2f, time: f32) -> f32 {
+    return fract(sin(dot(p, vec2f(12.9898, 78.233)) + time) * 43758.5453);
+}
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocation_id) local_id: vec3u) {
@@ -69,7 +75,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     // Optimization: Cache row of rules for this particle type to avoid N lookups in storage buffer
     let numTypes = i32(params.numTypes);
     let myType = i32(round(myColor));
-    var myRules: array<f32, 16>; // Supports up to 16 types
+    var myRules: array<f32, 32>; // Supports up to 32 types
     
     if (index < particleCount) {
         for (var t = 0; t < numTypes; t++) {
@@ -79,6 +85,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     }
 
     var force = vec2f(0.0, 0.0);
+    var newColor = myColor; // For growth/infection
+    let growthEnabled = params.growth > 0.5;
 
     // 3. Tiled N-Body Calculation
     // Iterate over particles in chunks (tiles) of BLOCK_SIZE
@@ -109,11 +117,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 let otherPos = tile_pos[j];
                 var d = otherPos - myPos;
 
-                // Torus Wrap
-                if (d.x > 1.0) { d.x -= 2.0; }
-                if (d.x < -1.0) { d.x += 2.0; }
-                if (d.y > 1.0) { d.y -= 2.0; }
-                if (d.y < -1.0) { d.y += 2.0; }
+                // Branchless Torus Wrap
+                // This eliminates 4 branches per interaction, significantly improving performance.
+                d = d - 2.0 * round(d / 2.0);
 
                 let dist = length(d);
 
@@ -124,6 +130,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                     var f = 0.0;
                     if (dist < params.minDist) {
                         f = -1.0 * (1.0 - dist / params.minDist) * 3.0; 
+                        
+                        // --- Biological Growth (Infection) ---
+                        // If very close (touching), chance to copy neighbor's color
+                        if (growthEnabled && dist < 0.05) {
+                            let randVal = hash(myPos + vec2f(f32(j), params.time), params.time);
+                            // Increased probability (0.01) for faster, more visible organic growth
+                            if (randVal < 0.01) { 
+                                newColor = tile_color[j];
+                            }
+                        }
+
                     } else {
                         let numer = abs(2.0 * dist - params.rMax - params.minDist);
                         let denom = params.rMax - params.minDist;
@@ -143,12 +160,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         var p = particles[index];
         p.vel = (p.vel + force * params.dt) * params.friction;
         p.pos += p.vel * params.dt;
+        p.color = newColor; // Apply potential color change
 
-        // Wrap Position
-        if (p.pos.x > 1.0) { p.pos.x -= 2.0; }
-        if (p.pos.x < -1.0) { p.pos.x += 2.0; }
-        if (p.pos.y > 1.0) { p.pos.y -= 2.0; }
-        if (p.pos.y < -1.0) { p.pos.y += 2.0; }
+        // Branchless Wrap Position
+        p.pos = p.pos - 2.0 * round(p.pos / 2.0);
 
         particles[index] = p;
     }
@@ -183,7 +198,8 @@ struct Params {
     size: f32,
     opacity: f32,
     numTypes: f32,
-    pad2: f32,
+    time: f32,
+    growth: f32,
 };
 
 struct Color {
@@ -236,13 +252,15 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-    let d = length(input.uv);
-    if (d > 1.0) {
+    let dSq = dot(input.uv, input.uv); // Squared distance
+    if (dSq > 1.0) {
         discard;
     }
-    // Harder core, softer glow
-    let alpha = max(0.0, 1.0 - d);
-    let glow = pow(alpha, 1.5) * params.opacity; 
+    
+    // Aesthetic Improvement: Gaussian Glow
+    // This provides a much smoother, more organic light falloff compared to simple power functions.
+    // exp(-k * d^2) where k controls sharpness. 
+    let glow = exp(-4.0 * dSq) * params.opacity;
     
     // Premultiplied Alpha Output
     return vec4f(input.color.rgb * glow, glow);
@@ -429,14 +447,14 @@ export class SimulationEngine {
         // 4 floats per color (r,g,b,a)
         const data = new Float32Array(colors.length * 4);
         for(let i=0; i<colors.length; i++) {
+            // Check if user provided RGB or we need to parse hex/string. 
+            // Simplified: The ColorDefinition type has r,g,b numbers.
             data[i*4 + 0] = colors[i].r / 255.0;
             data[i*4 + 1] = colors[i].g / 255.0;
             data[i*4 + 2] = colors[i].b / 255.0;
             data[i*4 + 3] = 1.0; 
         }
 
-        // We re-create this buffer if size changes, so typical destroy pattern if needed
-        // but for now we assume it's created during updateColors or init
         this.colorBuffer = this.device.createBuffer({
             size: data.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -464,7 +482,9 @@ export class SimulationEngine {
             params.particleSize,
             params.baseColorOpacity,
             params.numTypes,
-            0 // Padding
+            0.0, // Time
+            params.growth ? 1.0 : 0.0, // Growth flag
+            0.0 // Padding
         ]);
         this.paramsData = data;
 
@@ -508,9 +528,6 @@ export class SimulationEngine {
 
     public updateColors(colors: ColorDefinition[]) {
         if(!this.device) return;
-        
-        // If color count changed, we might need to recreate buffer if it's larger
-        // But for simplicity, let's just recreate it every time logic changes
         this.createColorBuffer(colors);
         this.updateBindGroups();
     }
@@ -526,11 +543,7 @@ export class SimulationEngine {
              needsBindGroupUpdate = true;
         }
 
-        // Check if NumTypes changed (requires particle re-init or just shader update)
-        // Note: The caller (App.tsx) handles resetting particles if numTypes changes drastically
-        // Here we just update the param
         this.numTypes = params.numTypes;
-        
         this.trailsEnabled = params.trails;
         this.blendMode = params.blendMode;
 
@@ -550,6 +563,7 @@ export class SimulationEngine {
         this.paramsData[8] = params.particleSize;
         this.paramsData[9] = params.baseColorOpacity;
         this.paramsData[10] = params.numTypes;
+        this.paramsData[12] = params.growth ? 1.0 : 0.0;
 
         this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
         
@@ -559,7 +573,6 @@ export class SimulationEngine {
     public updateRules(rules: RuleMatrix) {
         if (!this.device) return;
         const flat = new Float32Array(rules.flat());
-        // Recreate buffer if size changed
         if (this.rulesBuffer && this.rulesBuffer.size !== flat.byteLength) {
             this.createRulesBuffer(rules);
             this.updateBindGroups();
@@ -628,6 +641,12 @@ export class SimulationEngine {
         
         if (this.isPaused || !this.device || !this.context || !this.computePipeline || !this.pipelineAdditive || !this.renderTarget) return;
 
+        // Update time uniform for randomness
+        if (this.paramsData && this.paramsBuffer) {
+            this.paramsData[11] = timestamp / 1000.0;
+            this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
+        }
+
         const commandEncoder = this.device.createCommandEncoder();
 
         // 1. Compute Pass
@@ -635,12 +654,11 @@ export class SimulationEngine {
         computePass.setPipeline(this.computePipeline);
         computePass.setBindGroup(0, this.computeBindGroup!);
         
-        // Updated dispatch size for workgroup_size 256
         computePass.dispatchWorkgroups(Math.ceil(this.particleCount / 256));
         
         computePass.end();
 
-        // 2. Render Pass to Offscreen Texture
+        // 2. Render Pass
         const shouldClear = this.textureNeedsClear || !this.trailsEnabled;
         
         const renderPass = commandEncoder.beginRenderPass({
@@ -662,7 +680,7 @@ export class SimulationEngine {
         renderPass.draw(6, this.particleCount);
         renderPass.end();
 
-        // 3. Copy Offscreen Texture to Swap Chain (Canvas)
+        // 3. Copy to Swap Chain
         const currentTexture = this.context.getCurrentTexture();
         commandEncoder.copyTextureToTexture(
             { texture: this.renderTarget },

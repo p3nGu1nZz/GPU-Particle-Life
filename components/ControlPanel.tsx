@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Trash2, CheckCircle2 } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -15,18 +15,54 @@ interface ControlPanelProps {
     onRandomize: () => void;
     fps: number;
     toggleFullscreen: () => void;
+    isMutating: boolean;
+    setIsMutating: (m: boolean) => void;
+    mutationRate: number;
+    setMutationRate: (r: number) => void;
 }
 
 const ControlPanel: React.FC<ControlPanelProps> = ({ 
     params, setParams, rules, setRules, colors, setColors,
-    isPaused, setIsPaused, onReset, onRandomize, fps, toggleFullscreen
+    isPaused, setIsPaused, onReset, onRandomize, fps, toggleFullscreen,
+    isMutating, setIsMutating, mutationRate, setMutationRate
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     
-    // Helper to toggle rules
+    // Gear Icon Visibility Logic
+    const [isGearVisible, setIsGearVisible] = useState(false);
+    const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const startHideTimer = () => {
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = setTimeout(() => {
+            setIsGearVisible(false);
+        }, 2000); // 2 seconds delay
+    };
+
+    const handleMouseEnter = () => {
+        if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        setIsGearVisible(true);
+    };
+
+    const handleMouseLeave = () => {
+        if (isMinimized) {
+            startHideTimer();
+        }
+    };
+
+    useEffect(() => {
+        if (isMinimized) {
+            setIsGearVisible(true);
+            startHideTimer();
+        } else {
+            setIsGearVisible(false);
+            if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        }
+    }, [isMinimized]);
+    
+    // Helper to toggle rules (Legacy, mostly unused now as matrix is auto-evolving)
     const updateRule = (sourceIdx: number, targetIdx: number, value: number) => {
-        const newRules = [...rules];
-        newRules[sourceIdx] = [...newRules[sourceIdx]];
+        const newRules = rules.map(row => [...row]);
         newRules[sourceIdx][targetIdx] = value;
         setRules(newRules);
     };
@@ -51,12 +87,16 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     };
 
     const addColor = () => {
-        if (colors.length >= 16) return; // Limit to reasonable GPU shader limits
+        if (colors.length >= 32) return; 
         
-        // Random new color
+        const hue = Math.floor(Math.random() * 360);
+        const newHex = `hsl(${hue}, 100%, 50%)`;
+        
+        // Random RGB for init
         const r = Math.floor(Math.random() * 255);
         const g = Math.floor(Math.random() * 255);
         const b = Math.floor(Math.random() * 255);
+        
         const hex = "#" + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
         
         const newColors = [...colors, { r, g, b, name: hex }];
@@ -70,7 +110,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     };
 
     const randomizeColors = () => {
-        const newColors = colors.map(() => {
+        const newColors = colors.map((_, i) => {
             const r = Math.floor(Math.random() * 255);
             const g = Math.floor(Math.random() * 255);
             const b = Math.floor(Math.random() * 255);
@@ -82,14 +122,25 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
 
     return (
         <>
-            {/* Toggle Button (Visible when minimized) */}
-            <button 
-                onClick={() => setIsMinimized(false)}
-                className={`fixed top-4 left-4 z-30 p-2 bg-neutral-900/80 backdrop-blur-md rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-300 ${isMinimized ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-full pointer-events-none'}`}
-                title="Open Settings"
+            {/* Toggle Button Container (Hover Zone) */}
+            <div 
+                className={`fixed top-0 left-0 w-24 h-24 z-30 flex items-start justify-start pl-4 pt-4 transition-all duration-300 ${isMinimized ? 'pointer-events-auto' : 'pointer-events-none'}`}
+                onMouseEnter={handleMouseEnter}
+                onMouseLeave={handleMouseLeave}
             >
-                <Settings className="w-6 h-6 text-emerald-400" />
-            </button>
+                <button 
+                    onClick={() => setIsMinimized(false)}
+                    className={`p-2 bg-neutral-900/80 backdrop-blur-md rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-500 ${
+                        isMinimized 
+                            ? (isGearVisible ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-0') 
+                            : 'opacity-0 -translate-x-full'
+                    }`}
+                    style={{ pointerEvents: isMinimized && isGearVisible ? 'auto' : 'none' }}
+                    title="Open Settings"
+                >
+                    <Settings className="w-6 h-6 text-emerald-400" />
+                </button>
+            </div>
 
             {/* Sliding Panel */}
             <div 
@@ -218,6 +269,25 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                     </button>
                                 </div>
                             </div>
+                            
+                            {/* Biological Growth Toggle */}
+                            <div className="flex justify-between items-center bg-white/5 p-2 rounded border border-emerald-500/20">
+                                <div className="flex items-center space-x-2">
+                                    <Sprout className="w-4 h-4 text-emerald-400" />
+                                    <div className="flex flex-col">
+                                        <span className="text-xs text-emerald-100">Biological Growth</span>
+                                        <span className="text-[9px] text-emerald-500/70">Particles infect neighbors</span>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => updateParam('growth', !params.growth)}
+                                    className={`relative w-10 h-5 rounded-full transition-colors duration-200 ease-in-out border border-white/10 ${params.growth ? 'bg-emerald-600' : 'bg-neutral-800'}`}
+                                >
+                                    <span 
+                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-md transform transition-transform duration-200 ${params.growth ? 'translate-x-5' : 'translate-x-0'}`} 
+                                    />
+                                </button>
+                            </div>
 
                             <InputSlider 
                                 label="Color Opacity"
@@ -244,24 +314,25 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                     <button onClick={removeColor} disabled={colors.length <= 2} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-red-400 disabled:opacity-30">
                                         <Minus className="w-3 h-3" />
                                     </button>
-                                    <button onClick={addColor} disabled={colors.length >= 16} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-emerald-400 disabled:opacity-30">
+                                    <button onClick={addColor} disabled={colors.length >= 32} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-emerald-400 disabled:opacity-30">
                                         <Plus className="w-3 h-3" />
                                     </button>
                                 </div>
                             </div>
                             
-                            <div className="grid grid-cols-4 gap-2">
+                            <div className="grid grid-cols-8 gap-1.5">
                                 {colors.map((c, i) => (
-                                    <div key={i} className="relative group">
+                                    <div key={i} className="relative group w-full aspect-square">
                                         <input 
                                             type="color" 
                                             value={c.name} 
                                             onChange={(e) => handleColorChange(i, e.target.value)}
-                                            className="w-full h-6 block bg-transparent cursor-pointer rounded overflow-hidden opacity-0 absolute inset-0 z-10"
+                                            className="w-full h-full block bg-transparent cursor-pointer rounded-sm overflow-hidden opacity-0 absolute inset-0 z-10"
                                         />
                                         <div 
-                                            className="w-full h-6 rounded border border-white/20 shadow-sm"
+                                            className="w-full h-full rounded-sm border border-white/20 shadow-sm"
                                             style={{ backgroundColor: c.name }} 
+                                            title={`Color ${i}`}
                                         />
                                     </div>
                                 ))}
@@ -304,62 +375,129 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                         />
                     </div>
 
-                    {/* Matrix */}
+                    {/* Matrix Heatmap */}
                     <div className="mb-4">
                         <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-400">
-                                Interaction Matrix
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-400 flex items-center space-x-2">
+                                <span>Matrix</span>
+                                {isMutating && <Activity className="w-3 h-3 text-emerald-500 animate-pulse" />}
                             </h3>
-                            <div className="flex space-x-1">
-                                {[0, 1, -1].map(val => (
+                            <div className="flex space-x-2 items-center">
+                                <button 
+                                    onClick={() => setIsMutating(!isMutating)}
+                                    className={`flex items-center space-x-1 px-2 py-1 rounded text-[9px] border transition-colors ${isMutating ? 'bg-emerald-900/50 border-emerald-500 text-emerald-400' : 'bg-neutral-800 border-white/10 text-neutral-400'}`}
+                                >
+                                    <Dna className="w-3 h-3" />
+                                    <span>Evolve</span>
+                                </button>
+                                <div className="h-4 w-px bg-white/10"></div>
+                                <div className="flex space-x-1">
                                     <button 
-                                        key={val}
-                                        onClick={() => setMatrixUniformly(val)}
-                                        className="w-5 h-5 text-[9px] bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded flex items-center justify-center font-mono border border-white/10"
+                                        onClick={() => setMatrixUniformly(0)}
+                                        className="w-16 h-5 text-[9px] bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded flex items-center justify-center border border-white/10"
                                     >
-                                        {val}
+                                        Clear
                                     </button>
-                                ))}
+                                </div>
                             </div>
                         </div>
                         
-                        <div 
-                            className="grid gap-1 items-center"
-                            style={{ gridTemplateColumns: `12px repeat(${colors.length}, 1fr)` }}
-                        >
-                            {/* Header Row */}
-                            <div className="w-3"></div>
-                            {colors.map((c, i) => (
-                                 <div key={`head-${i}`} className="w-2.5 h-2.5 rounded-full mx-auto ring-1 ring-white/20" style={{backgroundColor: c.name}} />
-                            ))}
-
-                            {/* Matrix Rows */}
-                            {rules.map((row, i) => (
-                                <React.Fragment key={`row-${i}`}>
-                                    <div className="w-2.5 h-2.5 rounded-full ring-1 ring-white/20" style={{backgroundColor: colors[i]?.name || '#fff'}} />
-                                    {row.map((val, j) => (
-                                        <MatrixCell 
-                                            key={`${i}-${j}`} 
-                                            value={val} 
-                                            onChange={(v) => updateRule(i, j, v)} 
-                                        />
-                                    ))}
-                                </React.Fragment>
-                            ))}
+                        <div className="mb-4 space-y-2 p-2 bg-white/5 rounded border border-white/10">
+                            <InputSlider 
+                                label="Mutation Rate"
+                                value={mutationRate}
+                                min={0.0} max={1.0} step={0.01}
+                                onChange={(v) => setMutationRate(v)}
+                                formatValue={(v) => `${Math.round(v * 100)}%`}
+                            />
                         </div>
+
+                        <MatrixHeatmap 
+                            rules={rules}
+                            colors={colors}
+                        />
                     </div>
                 </div>
 
                 {/* Footer */}
                 <div className="p-4 border-t border-white/10 text-[10px] text-neutral-500 text-center flex-shrink-0">
-                    Drag sliders to create new life forms.
+                    Matrix forces evolve naturally.
                 </div>
             </div>
         </>
     );
 };
 
-// Reusable Components
+// --- Subcomponents ---
+
+const MatrixHeatmap: React.FC<{
+    rules: RuleMatrix,
+    colors: ColorDefinition[]
+}> = ({ rules, colors }) => {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    
+    // Config for internal resolution
+    const headerSize = 10;
+    const padding = 1;
+    const cellSize = 9; 
+    const totalSize = headerSize + colors.length * cellSize;
+
+    const draw = useCallback(() => {
+        const cvs = canvasRef.current;
+        if (!cvs) return;
+        const ctx = cvs.getContext('2d');
+        if (!ctx) return;
+
+        // Clear
+        ctx.fillStyle = '#171717'; // neutral-900
+        ctx.fillRect(0, 0, totalSize, totalSize);
+
+        // Draw Headers (Top and Left)
+        colors.forEach((c, i) => {
+            ctx.fillStyle = c.name;
+            // Top Header (Column colors)
+            ctx.fillRect(headerSize + i * cellSize + padding, 0, cellSize - padding*2, headerSize - padding);
+            // Left Header (Row colors)
+            ctx.fillRect(0, headerSize + i * cellSize + padding, headerSize - padding, cellSize - padding*2);
+        });
+
+        // Draw Matrix
+        rules.forEach((row, r) => {
+            row.forEach((val, c) => {
+                const x = headerSize + c * cellSize;
+                const y = headerSize + r * cellSize;
+                
+                // Color mapping: Red (-1) -> Black (0) -> Green (1)
+                if (val > 0) {
+                    const intensity = Math.floor(val * 255);
+                    ctx.fillStyle = `rgb(0, ${intensity}, 0)`;
+                } else {
+                    const intensity = Math.floor(Math.abs(val) * 255);
+                    ctx.fillStyle = `rgb(${intensity}, 0, 0)`;
+                }
+
+                ctx.fillRect(x + padding, y + padding, cellSize - padding*2, cellSize - padding*2);
+            });
+        });
+
+    }, [rules, colors, cellSize, totalSize]);
+
+    useEffect(() => {
+        draw();
+    }, [draw]);
+
+    return (
+        <div className="relative w-full max-w-full">
+            <canvas 
+                ref={canvasRef}
+                width={totalSize}
+                height={totalSize}
+                className="rounded border border-white/10 mx-auto w-full h-auto block"
+                style={{ width: '100%', height: 'auto' }}
+            />
+        </div>
+    );
+};
 
 const InputSlider: React.FC<{
     label: string;
@@ -382,7 +520,6 @@ const InputSlider: React.FC<{
     const handleCommit = () => {
         let val = parseFloat(tempValue);
         if (isNaN(val)) val = value;
-        // Only clamp min, not max, per user request for manual entry
         val = Math.max(min, val); 
         if (integer) val = Math.round(val);
         onChange(val);
@@ -425,69 +562,6 @@ const InputSlider: React.FC<{
                 onChange={(e) => onChange(parseFloat(e.target.value))}
                 className="w-full h-1 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-emerald-500 hover:accent-emerald-400"
             />
-        </div>
-    );
-};
-
-const MatrixCell: React.FC<{ value: number, onChange: (v: number) => void }> = ({ value, onChange }) => {
-    const [isHovered, setIsHovered] = useState(false);
-    const [isEditing, setIsEditing] = useState(false);
-    const [tempValue, setTempValue] = useState(value.toString());
-
-    const handleCommit = () => {
-        let val = parseFloat(tempValue);
-        if (isNaN(val)) val = value;
-        val = Math.max(-1, Math.min(1, val));
-        onChange(val);
-        setIsEditing(false);
-    };
-
-    return (
-         <div 
-            className="relative h-8 w-full flex items-center justify-center group bg-white/5 rounded overflow-hidden"
-            onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
-        >
-            
-            {/* Visual Indicator (Bar) */}
-            <div 
-                className={`absolute inset-0 transition-all duration-300 opacity-30 ${value > 0 ? 'bg-emerald-500' : 'bg-red-500'}`}
-                style={{ 
-                    width: `${Math.abs(value) * 100}%`,
-                    left: value > 0 ? '0' : 'auto',
-                    right: value < 0 ? '0' : 'auto'
-                }}
-            />
-            
-            {/* Range Input Overlay (Vertical for Matrix feel) */}
-             <input 
-                type="range" min="-1" max="1" step="0.1"
-                value={value}
-                onChange={(e) => onChange(parseFloat(e.target.value))}
-                className="absolute w-full h-full opacity-0 cursor-ew-resize z-10"
-                title={`Value: ${value.toFixed(1)}`}
-            />
-
-            {/* Text Value */}
-            <div className="relative z-20 pointer-events-none">
-                {isEditing ? (
-                     <input
-                        type="number"
-                        className="w-10 bg-black/90 text-center text-[9px] text-white font-mono rounded border border-white/20 outline-none pointer-events-auto"
-                        value={tempValue}
-                        onChange={(e) => setTempValue(e.target.value)}
-                        onBlur={handleCommit}
-                        onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
-                        autoFocus
-                    />
-                ) : (
-                    <span 
-                        className={`text-[9px] font-bold font-mono transition-transform block ${value === 0 ? 'text-neutral-600' : value > 0 ? 'text-emerald-100' : 'text-red-100'}`}
-                    >
-                        {value.toFixed(1)}
-                    </span>
-                )}
-            </div>
         </div>
     );
 };

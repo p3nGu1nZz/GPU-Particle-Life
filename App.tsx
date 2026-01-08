@@ -16,6 +16,8 @@ const App: React.FC = () => {
   const [colors, setColors] = useState<ColorDefinition[]>(DEFAULT_COLORS);
   
   const [isPaused, setIsPaused] = useState(false);
+  const [isMutating, setIsMutating] = useState(true); // Evolve on by default
+  const [mutationRate, setMutationRate] = useState(0.10); // Control how fast the matrix evolves
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
   // Initialize WebGPU Engine
@@ -97,12 +99,10 @@ const App: React.FC = () => {
           setRules(newRules);
           
           // Force reset particles when changing types to redistribute 
-          // (Wait a tick to let state settle or call directly)
           setTimeout(() => engineRef.current?.reset(), 0);
       }
       
       engineRef.current?.updateColors(colors);
-      
       // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [colors]);
 
@@ -124,6 +124,60 @@ const App: React.FC = () => {
   useEffect(() => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
+
+  // --- Neural / Organic Matrix Evolution ---
+  useEffect(() => {
+      if (!isMutating || isPaused) return;
+
+      const evolutionInterval = setInterval(() => {
+          setRules(prevRules => {
+              const size = prevRules.length;
+              const nextRules = prevRules.map(row => [...row]);
+              
+              // We simulate a cellular automaton on the rule matrix itself.
+              // This makes the "forces" grow and diffuse organically like a neural network
+              // or a biological tissue, rather than just random white noise.
+              
+              for(let i = 0; i < size; i++) {
+                  for(let j = 0; j < size; j++) {
+                      // Get neighbors (wrapping around the matrix)
+                      // These represent relationships between adjacent colors in our spectrum
+                      const nUp = prevRules[(i - 1 + size) % size][j];
+                      const nDown = prevRules[(i + 1) % size][j];
+                      const nLeft = prevRules[i][(j - 1 + size) % size];
+                      const nRight = prevRules[i][(j + 1) % size];
+
+                      // Convolve: Calculate average of neighbors
+                      const neighborAvg = (nUp + nDown + nLeft + nRight) / 4;
+                      
+                      const current = prevRules[i][j];
+
+                      // 1. Diffusion: The cell drifts towards its neighbors' average (Smoothing)
+                      const diffusionRate = 0.1;
+                      let delta = (neighborAvg - current) * diffusionRate;
+
+                      // 2. Mutation/Energy: Inject noise based on mutation rate
+                      // If mutationRate is 0, the matrix just smooths out to 0.
+                      const noise = (Math.random() - 0.5) * mutationRate * 0.5;
+                      
+                      // 3. Apply
+                      let newVal = current + delta + noise;
+
+                      // 4. Decay (optional, prevents saturation sticking)
+                      newVal *= 0.995;
+
+                      // Clamp
+                      newVal = Math.max(-1, Math.min(1, newVal));
+                      
+                      nextRules[i][j] = newVal;
+                  }
+              }
+              return nextRules;
+          });
+      }, 100); // Update 10 times a second
+
+      return () => clearInterval(evolutionInterval);
+  }, [isMutating, isPaused, mutationRate]);
 
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;
@@ -172,7 +226,7 @@ const App: React.FC = () => {
         className="absolute inset-0 block w-full h-full outline-none"
       />
 
-      {/* Control Panel (Handles its own positioning) */}
+      {/* Control Panel */}
       <ControlPanel 
         params={params} 
         setParams={setParams} 
@@ -186,6 +240,10 @@ const App: React.FC = () => {
         onRandomize={handleRandomizeRules}
         fps={fps}
         toggleFullscreen={toggleFullscreen}
+        isMutating={isMutating}
+        setIsMutating={setIsMutating}
+        mutationRate={mutationRate}
+        setMutationRate={setMutationRate}
       />
     </div>
   );
