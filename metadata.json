@@ -1,0 +1,5 @@
+{
+  "name": "GPU Particle Life",
+  "description": "A high-performance Particle Life simulation using WebGPU compute shaders and Web Workers for smooth, complex emergent behavior.",
+  "requestFramePermissions": []
+}
