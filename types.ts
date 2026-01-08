@@ -18,6 +18,7 @@ export interface SimulationParams {
     baseColorOpacity: number;
     numTypes: number; // Dynamic number of particle types
     growth: boolean; // Biological growth/infection mechanic
+    temperature: number; // Entropy/Thermal Noise
     // Interaction fields (handled internally by engine usually, but good to have in type)
     mouseInteractionRadius: number;
     mouseInteractionForce: number;

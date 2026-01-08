@@ -23,7 +23,7 @@ struct Particle {
     pad2: f32,
 };
 
-// Aligned to 16 floats (64 bytes)
+// Aligned to 16 floats + 4 floats padding = 20 floats (80 bytes)
 struct Params {
     width: f32,
     height: f32,
@@ -40,7 +40,11 @@ struct Params {
     growth: f32,
     mouseX: f32,
     mouseY: f32,
-    mouseType: f32, // 0 = none, 1 = repel, -1 = attract
+    mouseType: f32,
+    temperature: f32, // Thermal Energy
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -52,8 +56,17 @@ const BLOCK_SIZE = 256u;
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
 
+// Pseudo-random hash for noise
 fn hash(p: vec2f) -> f32 {
     return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
+}
+
+// 2D Random for thermal noise
+fn rand2(seed: vec2f) -> vec2f {
+    return vec2f(
+        hash(seed + vec2f(1.0, 0.0)),
+        hash(seed + vec2f(0.0, 1.0))
+    ) * 2.0 - 1.0;
 }
 
 @compute @workgroup_size(256)
@@ -102,7 +115,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         
         if (distM < mouseRadius) {
             let mForce = (1.0 - distM / mouseRadius) * 5.0; // Strong force
-            // params.mouseType: 1.0 (Repel), -1.0 (Attract)
             force += (dm / (distM + 0.001)) * mForce * params.mouseType;
         }
     }
@@ -139,11 +151,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                         // Smooth but strong repulsion curve
                         f = -4.0 * (1.0 - relDist); 
                         
-                        // Growth logic (Infection)
-                        // Uses index and time step to avoid coherent waves
+                        // Growth logic
                         if (growthEnabled && dist < 0.02) {
-                             // Probability check
-                             // params.time is float seconds. floor(time*10) makes it change 10 times a sec
                              let t = floor(params.time * 2.0); 
                              let randVal = hash(vec2f(f32(j) + t, f32(index)));
                              if (randVal < 0.01) { newColor = tile_color[j]; }
@@ -161,7 +170,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         workgroupBarrier();
     }
 
+    // --- Entropy / Temperature (Boltzmann-like thermal noise) ---
     if (index < particleCount) {
+        let seed = myPos + vec2f(params.time, f32(index) * 0.01);
+        let thermalForce = rand2(seed) * params.temperature;
+        force += thermalForce;
+
+        // Force Clamping to prevent jitter/explosion
+        let fLen = length(force);
+        let maxForce = 20.0; 
+        if (fLen > maxForce) {
+            force = (force / fLen) * maxForce;
+        }
+
         var p = particles[index];
         p.vel = (p.vel + force * params.dt) * params.friction;
         p.pos += p.vel * params.dt;
@@ -205,6 +226,7 @@ struct Params {
     mouseX: f32,
     mouseY: f32,
     mouseType: f32,
+    temperature: f32,
 };
 
 struct Color {
@@ -231,7 +253,6 @@ fn vs_main(
     
     let offset = offsets[vIdx] * sizeNDC;
     
-    // Correction for aspect ratio in Vertex Shader so particles are round
     let w = select(params.width, 1.0, params.width == 0.0);
     let h = select(params.height, 1.0, params.height == 0.0);
     let aspect = w / h;
@@ -259,12 +280,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
         discard;
     }
     
-    let core = exp(-10.0 * dSq);
-    let halo = exp(-2.0 * dSq);
-    let signal = max(core, halo * 0.4);
-    let alpha = signal * params.opacity;
-    let whiteMix = smoothstep(0.5, 1.0, core);
-    let finalColor = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteMix * 0.65);
+    // Softer glow profile
+    let core = exp(-6.0 * dSq); 
+    let alpha = core * params.opacity;
+    let whiteMix = smoothstep(0.6, 1.0, core);
+    let finalColor = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteMix * 0.4);
     
     return vec4f(finalColor * alpha, alpha);
 }
@@ -312,7 +332,7 @@ export class SimulationEngine {
     // Mouse Tracking
     private mouseX: number = 0;
     private mouseY: number = 0;
-    private mouseInteractionType: number = 0; // 0=none, 1=repel, -1=attract
+    private mouseInteractionType: number = 0; 
 
     constructor(canvas: HTMLCanvasElement, onFpsUpdate?: (fps: number) => void) {
         this.canvas = canvas;
@@ -321,49 +341,23 @@ export class SimulationEngine {
     }
 
     private setupInputHandlers() {
-        // Map screen pixels to simulation space (-1 to 1)
-        // Note: Canvas Y is down, Simulation Y is up (in most GPU math), but here
-        // our Vertex Shader maps -1 to bottom? 
-        // Let's verify: vs_main uses p.pos + offset. 
-        // Clip space: (-1,-1) is bottom-left. 
-        // Canvas event: (0,0) is top-left.
-        // So Y needs inverting.
-        
         const updateMouse = (e: MouseEvent) => {
             const rect = this.canvas.getBoundingClientRect();
             const x = (e.clientX - rect.left) / rect.width;
             const y = (e.clientY - rect.top) / rect.height;
-            
-            // Map 0..1 to -1..1
             this.mouseX = x * 2.0 - 1.0;
-            this.mouseY = -(y * 2.0 - 1.0); // Invert Y
+            this.mouseY = -(y * 2.0 - 1.0); 
         };
 
-        this.canvas.addEventListener('mousemove', (e) => {
-            updateMouse(e);
-        });
-
+        this.canvas.addEventListener('mousemove', (e) => updateMouse(e));
         this.canvas.addEventListener('mousedown', (e) => {
             updateMouse(e);
-            // Left click (0) = Repel (1), Right click (2) = Attract (-1)
-            if (e.button === 0) {
-                this.mouseInteractionType = 1.0;
-            } else if (e.button === 2) {
-                this.mouseInteractionType = -1.0;
-            }
+            if (e.button === 0) this.mouseInteractionType = 1.0;
+            else if (e.button === 2) this.mouseInteractionType = -1.0;
         });
-
-        this.canvas.addEventListener('mouseup', () => {
-            this.mouseInteractionType = 0;
-        });
-        
-        this.canvas.addEventListener('mouseleave', () => {
-            this.mouseInteractionType = 0;
-        });
-
-        this.canvas.addEventListener('contextmenu', (e) => {
-            e.preventDefault(); // Prevent context menu on right click
-        });
+        this.canvas.addEventListener('mouseup', () => this.mouseInteractionType = 0);
+        this.canvas.addEventListener('mouseleave', () => this.mouseInteractionType = 0);
+        this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     }
 
     async init(params: SimulationParams, rules: RuleMatrix, colors: ColorDefinition[]) {
@@ -460,7 +454,6 @@ export class SimulationEngine {
 
     private createParticleBuffer() {
         if (!this.device) return;
-        
         const count = this.particleCount;
         const data = new Float32Array(count * 8); 
         for(let i=0; i<count; i++) {
@@ -470,7 +463,6 @@ export class SimulationEngine {
             data[i*8 + 3] = 0;
             data[i*8 + 4] = Math.floor(Math.random() * this.numTypes);
         }
-
         this.particleBuffer = this.device.createBuffer({
             size: data.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -501,7 +493,6 @@ export class SimulationEngine {
             data[i*4 + 2] = colors[i].b / 255.0;
             data[i*4 + 3] = 1.0; 
         }
-
         this.colorBuffer = this.device.createBuffer({
             size: data.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -513,11 +504,10 @@ export class SimulationEngine {
 
     private createParamsBuffer(params: SimulationParams) {
         if (!this.device) return;
-        
         const scaledWidth = this.windowWidth * this.dpiScale;
         const scaledHeight = this.windowHeight * this.dpiScale;
 
-        // Exactly 16 floats (64 bytes)
+        // Expanded to 20 floats (80 bytes)
         const data = new Float32Array([
             scaledWidth,
             scaledHeight,
@@ -532,9 +522,11 @@ export class SimulationEngine {
             params.numTypes,
             0.0, // time
             params.growth ? 1.0 : 0.0,
-            0.0, // mouseX (initially 0)
-            0.0, // mouseY (initially 0)
-            0.0, // mouseType (initially 0)
+            0.0, // mouseX
+            0.0, // mouseY
+            0.0, // mouseType
+            params.temperature,
+            0.0, 0.0, 0.0 // Padding
         ]);
         this.paramsData = data;
 
@@ -548,7 +540,7 @@ export class SimulationEngine {
     }
 
     private updateBindGroups() {
-        if (!this.device || !this.computePipeline || !this.pipelineAdditive || !this.pipelineNormal || !this.particleBuffer || !this.rulesBuffer || !this.paramsBuffer || !this.colorBuffer) return;
+        if (!this.device || !this.computePipeline || !this.pipelineAdditive || !this.particleBuffer) return;
 
         this.computeBindGroup = this.device.createBindGroup({
             layout: this.computePipeline.getBindGroupLayout(0),
@@ -571,7 +563,7 @@ export class SimulationEngine {
         });
 
         this.renderBindGroupNormal = this.device.createBindGroup({
-            layout: this.pipelineNormal.getBindGroupLayout(0),
+            layout: this.pipelineNormal!.getBindGroupLayout(0),
             entries: renderEntries,
         });
     }
@@ -586,7 +578,6 @@ export class SimulationEngine {
         if (!this.device || !this.paramsBuffer || !this.paramsData) return;
         
         let needsBindGroupUpdate = false;
-
         if (params.particleCount !== this.particleCount) {
              this.particleCount = params.particleCount;
              this.createParticleBuffer();
@@ -602,8 +593,6 @@ export class SimulationEngine {
             this.resize(this.windowWidth, this.windowHeight);
         }
 
-        // Only update the static physics params.
-        // Mouse coords are updated in the loop.
         this.paramsData[0] = this.windowWidth * this.dpiScale;
         this.paramsData[1] = this.windowHeight * this.dpiScale;
         this.paramsData[2] = params.friction;
@@ -616,11 +605,9 @@ export class SimulationEngine {
         this.paramsData[9] = params.baseColorOpacity;
         this.paramsData[10] = params.numTypes;
         this.paramsData[12] = params.growth ? 1.0 : 0.0;
+        this.paramsData[16] = params.temperature;
         
-        // Don't overwrite mouse data here
-
         this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
-        
         if(needsBindGroupUpdate) this.updateBindGroups();
     }
 
@@ -637,16 +624,12 @@ export class SimulationEngine {
 
     public resize(width: number, height: number) {
         if (!this.device) return;
-        
         this.windowWidth = width;
         this.windowHeight = height;
-
         const scaledWidth = Math.floor(width * this.dpiScale);
         const scaledHeight = Math.floor(height * this.dpiScale);
-
         this.canvas.width = scaledWidth;
         this.canvas.height = scaledHeight;
-
         const format = (navigator as any).gpu.getPreferredCanvasFormat();
         
         this.context?.configure({
@@ -697,11 +680,9 @@ export class SimulationEngine {
 
         if (this.paramsData && this.paramsBuffer) {
             this.paramsData[11] = timestamp / 1000.0;
-            // Update Mouse Data per frame
             this.paramsData[13] = this.mouseX;
             this.paramsData[14] = this.mouseY;
             this.paramsData[15] = this.mouseInteractionType;
-
             this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
         }
 
@@ -714,7 +695,6 @@ export class SimulationEngine {
         computePass.end();
 
         const shouldClear = this.textureNeedsClear || !this.trailsEnabled;
-        
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: [{
                 view: this.renderTarget.createView(),
@@ -725,10 +705,8 @@ export class SimulationEngine {
         });
         
         this.textureNeedsClear = false;
-
         const pipeline = this.blendMode === 'normal' ? this.pipelineNormal! : this.pipelineAdditive!;
         const bindGroup = this.blendMode === 'normal' ? this.renderBindGroupNormal! : this.renderBindGroupAdditive!;
-
         renderPass.setPipeline(pipeline);
         renderPass.setBindGroup(0, bindGroup);
         renderPass.draw(6, this.particleCount);

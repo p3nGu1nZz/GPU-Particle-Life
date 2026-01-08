@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout, MousePointer2 } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout, MousePointer2, Thermometer } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -355,24 +355,37 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                             onChange={(v) => updateParam('particleSize', v)}
                         />
                         <div className="h-px bg-white/5 my-2" />
-                        <InputSlider 
-                            label="Friction"
-                            value={params.friction}
-                            min={0.5} max={0.99} step={0.01}
-                            onChange={(v) => updateParam('friction', v)}
-                        />
-                        <InputSlider 
-                            label="Force Strength"
-                            value={params.forceFactor}
-                            min={0.1} max={5.0} step={0.1}
-                            onChange={(v) => updateParam('forceFactor', v)}
-                        />
-                        <InputSlider 
-                            label="Interaction Radius"
-                            value={params.rMax}
-                            min={0.05} max={0.5} step={0.01}
-                            onChange={(v) => updateParam('rMax', v)}
-                        />
+                        
+                        <div className="space-y-3">
+                             <div className="flex items-center space-x-2 text-neutral-400">
+                                <Thermometer className="w-4 h-4" />
+                                <span className="text-xs font-bold tracking-wider">PHYSICS</span>
+                             </div>
+                            <InputSlider 
+                                label="Temperature (Entropy)"
+                                value={params.temperature}
+                                min={0.0} max={10.0} step={0.1}
+                                onChange={(v) => updateParam('temperature', v)}
+                            />
+                            <InputSlider 
+                                label="Friction"
+                                value={params.friction}
+                                min={0.5} max={0.99} step={0.01}
+                                onChange={(v) => updateParam('friction', v)}
+                            />
+                            <InputSlider 
+                                label="Force Strength"
+                                value={params.forceFactor}
+                                min={0.1} max={5.0} step={0.1}
+                                onChange={(v) => updateParam('forceFactor', v)}
+                            />
+                            <InputSlider 
+                                label="Interaction Radius"
+                                value={params.rMax}
+                                min={0.05} max={0.5} step={0.01}
+                                onChange={(v) => updateParam('rMax', v)}
+                            />
+                        </div>
                     </div>
 
                     {/* Matrix Heatmap */}

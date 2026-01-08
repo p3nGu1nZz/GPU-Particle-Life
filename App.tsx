@@ -16,8 +16,8 @@ const App: React.FC = () => {
   const [colors, setColors] = useState<ColorDefinition[]>(DEFAULT_COLORS);
   
   const [isPaused, setIsPaused] = useState(false);
-  const [isMutating, setIsMutating] = useState(true); // Evolve on by default
-  const [mutationRate, setMutationRate] = useState(0.05); // Lower default mutation rate for stability
+  const [isMutating, setIsMutating] = useState(true); 
+  const [mutationRate, setMutationRate] = useState(0.05); 
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
   // Initialize WebGPU Engine
@@ -67,7 +67,7 @@ const App: React.FC = () => {
       engineRef.current?.destroy();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeGpuPreference]); // Re-run when GPU preference changes
+  }, [activeGpuPreference]); 
 
   // Update logic when Color count changes
   useEffect(() => {
@@ -129,6 +129,7 @@ const App: React.FC = () => {
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
+      // Slowed down to 200ms to reduce visual "wave" artifacts
       const evolutionInterval = setInterval(() => {
           
           let totalMagnitude = 0;
@@ -161,17 +162,9 @@ const App: React.FC = () => {
                       const neighborAvg = neighborSum / count;
                       const current = prevRules[i][j];
                       
-                      // --- Smoother Turing-like Evolution ---
-                      
-                      // 1. Diffusion: Pull towards neighbors
                       const diffusion = (neighborAvg - current) * 0.1;
-                      
-                      // 2. Reaction: 
-                      // Old: Push away from 0 towards -1 or 1 (Bistability)
-                      // New: Weaker bistability to allow for gray areas (complex behaviors)
                       const reaction = (current - current * current * current) * 0.02;
                       
-                      // 3. Small stochastic drift (Mutation)
                       let mutation = 0;
                       if (Math.random() < mutationRate * 0.01) {
                           mutation = (Math.random() - 0.5) * 0.5;
@@ -179,25 +172,16 @@ const App: React.FC = () => {
 
                       let target = current + diffusion + reaction + mutation;
 
-                      // 4. Centering Force (Decay)
-                      // This prevents the matrix from becoming a solid block of Red or Green.
-                      // It constantly pulls values slightly towards 0.
                       target -= current * 0.01;
 
-                      // 5. Pattern Bias
-                      // If a local area becomes too saturated (too ordered), disrupt it.
                       if (Math.abs(neighborAvg) > 0.4) {
-                           target -= neighborAvg * 0.1; // Negative feedback loop
+                           target -= neighborAvg * 0.1; 
                       }
 
-                      // Smooth temporal update
                       const lerpSpeed = 0.1; 
                       nextRules[i][j] = current + (target - current) * lerpSpeed;
-                      
-                      // Hard Clamp
                       nextRules[i][j] = Math.max(-1, Math.min(1, nextRules[i][j]));
                       
-                      // Stats for Physics
                       totalMagnitude += Math.abs(nextRules[i][j]);
                       totalCells++;
                   }
@@ -205,14 +189,11 @@ const App: React.FC = () => {
               return nextRules;
           });
           
-          // Apply Adaptive Physics
           if (totalCells > 0) {
               const avgMagnitude = totalMagnitude / totalCells;
-              
               const baseForce = DEFAULT_PARAMS.forceFactor;
               let adaptationMult = 1.0;
               
-              // Stabilize energy - if rules are weak, boost force. If rules are strong, lower force.
               if (avgMagnitude > 0.5) {
                    adaptationMult = 0.5; 
               } else if (avgMagnitude < 0.1) {
@@ -220,8 +201,6 @@ const App: React.FC = () => {
               }
               
               const targetForce = baseForce * adaptationMult;
-              
-              // Only update if difference is significant to avoid React thrashing
               if (Math.abs(targetForce - params.forceFactor) > 0.05) {
                   setParams(p => ({
                       ...p,
@@ -230,14 +209,13 @@ const App: React.FC = () => {
               }
           }
 
-      }, 100); 
+      }, 200); // 200ms interval for stability
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate, params.forceFactor]);
 
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;
-    // Initialize with smooth noise (Perlin-ish) for better start than white noise
     const newRules = Array(num).fill(0).map((_, y) => 
          Array(num).fill(0).map((_, x) => Math.sin(x * 0.1) * Math.cos(y * 0.1) + (Math.random() - 0.5))
     );

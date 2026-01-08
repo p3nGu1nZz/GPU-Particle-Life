@@ -38,11 +38,11 @@ export const DEFAULT_COLORS: ColorDefinition[] = generateColors(64);
 
 export const DEFAULT_PARAMS: SimulationParams = {
     particleCount: 16000,
-    friction: 0.82,     // Increased drag slightly to dampen jitter
+    friction: 0.82,     
     dt: 0.02,       
-    rMax: 0.1,          // Reduced interaction radius to match particle density better
-    forceFactor: 0.4,   // Balanced force
-    minDistance: 0.01,  // Much smaller core to prevent explosive overcrowding
+    rMax: 0.1,          
+    forceFactor: 0.4,   
+    minDistance: 0.01,  
     particleSize: 2.0,  
     trails: false,
     dpiScale: 1.0,
@@ -50,7 +50,8 @@ export const DEFAULT_PARAMS: SimulationParams = {
     blendMode: 'additive',
     baseColorOpacity: 0.8,
     numTypes: 64, 
-    growth: false,      // Disabled by default to prevent "ocean wave" color flickering
+    growth: false,      
+    temperature: 1.0,   // Default thermal energy to prevent freezing
     mouseInteractionRadius: 0.3,
     mouseInteractionForce: 5.0, 
 };
@@ -58,7 +59,7 @@ export const DEFAULT_PARAMS: SimulationParams = {
 // Generate random rules so the matrix isn't black on start
 const generateRandomRules = (size: number): RuleMatrix => {
     return Array(size).fill(0).map(() => 
-        Array(size).fill(0).map(() => (Math.random() * 2 - 1) * 0.5) // Range -0.5 to 0.5 initially
+        Array(size).fill(0).map(() => (Math.random() * 2 - 1) * 0.5) 
     );
 };
 
