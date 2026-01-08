@@ -42,7 +42,7 @@ export const DEFAULT_PARAMS: SimulationParams = {
     rMax: 0.12,         // Significantly reduced for tighter local clusters
     forceFactor: 0.40,  // Increased force to balance smaller radius
     minDistance: 0.04,  // Reduced to allow tighter packing
-    particleSize: 2.0,
+    particleSize: 2.5,  // Increased to 2.5 for better visibility with glow shader
     trails: false,
     dpiScale: 1.0,
     gpuPreference: 'high-performance',

@@ -134,42 +134,65 @@ const App: React.FC = () => {
               const size = prevRules.length;
               const nextRules = prevRules.map(row => [...row]);
               
-              // We simulate a cellular automaton on the rule matrix itself.
-              // This makes the "forces" grow and diffuse organically like a neural network
-              // or a biological tissue, rather than just random white noise.
+              // ALGORITHM: Reaction-Diffusion Cellular Automata
+              // Inspired by Conway's Game of Life and Neural Networks (Activation Functions)
               
               for(let i = 0; i < size; i++) {
                   for(let j = 0; j < size; j++) {
-                      // Get neighbors (wrapping around the matrix)
-                      // These represent relationships between adjacent colors in our spectrum
-                      const nUp = prevRules[(i - 1 + size) % size][j];
-                      const nDown = prevRules[(i + 1) % size][j];
-                      const nLeft = prevRules[i][(j - 1 + size) % size];
-                      const nRight = prevRules[i][(j + 1) % size];
-
-                      // Convolve: Calculate average of neighbors
-                      const neighborAvg = (nUp + nDown + nLeft + nRight) / 4;
                       
+                      // 1. Convolution (3x3 Neighbor Sensing)
+                      // We gather influence from the "neighborhood" of this interaction rule.
+                      // If 'i' interacts with 'j', we check how neighbors of 'i' interact with neighbors of 'j'.
+                      // This builds structured relationships (transitive properties).
+                      let neighborSum = 0;
+                      let count = 0;
+
+                      for(let di = -1; di <= 1; di++) {
+                          for(let dj = -1; dj <= 1; dj++) {
+                              if (di === 0 && dj === 0) continue;
+                              
+                              const ni = (i + di + size) % size;
+                              const nj = (j + dj + size) % size;
+                              
+                              // Weight direct neighbors (up/down/left/right) higher than diagonals
+                              const weight = (Math.abs(di) + Math.abs(dj) === 1) ? 1.0 : 0.7;
+                              
+                              neighborSum += prevRules[ni][nj] * weight;
+                              count += weight;
+                          }
+                      }
+                      
+                      const neighborAvg = neighborSum / count;
                       const current = prevRules[i][j];
 
-                      // 1. Diffusion: The cell drifts towards its neighbors' average (Smoothing)
-                      const diffusionRate = 0.1;
-                      let delta = (neighborAvg - current) * diffusionRate;
-
-                      // 2. Mutation/Energy: Inject noise based on mutation rate
-                      // If mutationRate is 0, the matrix just smooths out to 0.
-                      const noise = (Math.random() - 0.5) * mutationRate * 0.5;
+                      // 2. Neural Activation (Non-linearity)
+                      // Instead of linear averaging, we use Tanh.
+                      // This pushes values towards -1 or 1, creating "decisive" rules.
+                      // It prevents the matrix from becoming a grey soup of 0.1 values.
+                      const socialPressure = neighborAvg * 1.5; // Gain factor
+                      const inertia = current * 0.8;
                       
-                      // 3. Apply
-                      let newVal = current + delta + noise;
+                      // Calculate target value based on neighborhood and self
+                      let target = Math.tanh(socialPressure + inertia);
 
-                      // 4. Decay (optional, prevents saturation sticking)
-                      newVal *= 0.995;
+                      // 3. Gated Mutation (Game of Life Style)
+                      // Low mutation rate: Subtle drift
+                      // High mutation rate: Random re-rolls
+                      if (Math.random() < mutationRate * 0.2) {
+                          // "Spontaneous Generation": 
+                          // If a rule is very weak (near 0), it's "dead". Randomly respawn it strongly.
+                          if (Math.abs(current) < 0.1) {
+                              target = (Math.random() * 2 - 1); 
+                          } else {
+                              // Standard drift
+                              target += (Math.random() - 0.5) * 0.5;
+                          }
+                      }
 
-                      // Clamp
-                      newVal = Math.max(-1, Math.min(1, newVal));
-                      
-                      nextRules[i][j] = newVal;
+                      // 4. Time Integration (Smoothness)
+                      // Interpolate towards the target to prevent jitter
+                      const lerpSpeed = 0.1; 
+                      nextRules[i][j] = current + (target - current) * lerpSpeed;
                   }
               }
               return nextRules;

@@ -257,13 +257,30 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
         discard;
     }
     
-    // Aesthetic Improvement: Gaussian Glow
-    // This provides a much smoother, more organic light falloff compared to simple power functions.
-    // exp(-k * d^2) where k controls sharpness. 
-    let glow = exp(-4.0 * dSq) * params.opacity;
+    // Dual-Layer Glow Model for realistic light emission
+    
+    // 1. Core: Intense, tight falloff (k=10.0)
+    // Represents the physical source of the particle
+    let core = exp(-10.0 * dSq);
+    
+    // 2. Halo: Soft, wide falloff (k=2.0)
+    // Represents the atmospheric/lens glow
+    let halo = exp(-2.0 * dSq);
+    
+    // Combine: Maximize to ensure the core is always solid, 
+    // while the halo adds the soft edge.
+    let signal = max(core, halo * 0.4);
+    
+    let alpha = signal * params.opacity;
+    
+    // Hot Center Effect
+    // Mix towards white in the very center (high core intensity)
+    // to simulate light intensity saturation (overexposure).
+    let whiteMix = smoothstep(0.5, 1.0, core);
+    let finalColor = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteMix * 0.65);
     
     // Premultiplied Alpha Output
-    return vec4f(input.color.rgb * glow, glow);
+    return vec4f(finalColor * alpha, alpha);
 }
 `;
 
