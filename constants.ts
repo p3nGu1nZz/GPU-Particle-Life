@@ -23,7 +23,6 @@ function rgbToHex(r: number, g: number, b: number): string {
 const generateColors = (count: number): ColorDefinition[] => {
     const colors: ColorDefinition[] = [];
     for (let i = 0; i < count; i++) {
-        // Use a golden ratio offset for better color distribution across 64 types
         const golden_ratio_conjugate = 0.618033988749895;
         const hue = (i * golden_ratio_conjugate * 360) % 360;
         const { r, g, b } = hslToRgb(hue, 95, 55);
@@ -35,31 +34,32 @@ const generateColors = (count: number): ColorDefinition[] => {
     return colors;
 };
 
-// Increased to 64 for more complex emergent structures
 export const DEFAULT_COLORS: ColorDefinition[] = generateColors(64);
 
 export const DEFAULT_PARAMS: SimulationParams = {
     particleCount: 16000,
-    friction: 0.86,     // Reduced drag (higher value) to allow particles to orbit instead of collapsing
+    friction: 0.82,     // Increased drag slightly to dampen jitter
     dt: 0.02,       
-    rMax: 0.15,         // Reduced slightly to limit the number of attracting neighbors
-    forceFactor: 0.50,  // Moderate force
-    minDistance: 0.07,  // Increased core size to enforce spacing
-    particleSize: 2.5,  
+    rMax: 0.1,          // Reduced interaction radius to match particle density better
+    forceFactor: 0.4,   // Balanced force
+    minDistance: 0.01,  // Much smaller core to prevent explosive overcrowding
+    particleSize: 2.0,  
     trails: false,
     dpiScale: 1.0,
     gpuPreference: 'high-performance',
     blendMode: 'additive',
-    baseColorOpacity: 1.0,
+    baseColorOpacity: 0.8,
     numTypes: 64, 
-    growth: true,
+    growth: false,      // Disabled by default to prevent "ocean wave" color flickering
     mouseInteractionRadius: 0.3,
     mouseInteractionForce: 5.0, 
 };
 
-// Generate a blank matrix (all zeros)
-const generateBlankRules = (size: number): RuleMatrix => {
-    return Array(size).fill(0).map(() => Array(size).fill(0));
+// Generate random rules so the matrix isn't black on start
+const generateRandomRules = (size: number): RuleMatrix => {
+    return Array(size).fill(0).map(() => 
+        Array(size).fill(0).map(() => (Math.random() * 2 - 1) * 0.5) // Range -0.5 to 0.5 initially
+    );
 };
 
-export const DEFAULT_RULES: RuleMatrix = generateBlankRules(64);
+export const DEFAULT_RULES: RuleMatrix = generateRandomRules(64);

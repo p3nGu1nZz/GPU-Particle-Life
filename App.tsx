@@ -166,8 +166,10 @@ const App: React.FC = () => {
                       // 1. Diffusion: Pull towards neighbors
                       const diffusion = (neighborAvg - current) * 0.1;
                       
-                      // 2. Reaction: Push away from 0 towards stable states (-1 or 1)
-                      const reaction = (current - current * current * current) * 0.05;
+                      // 2. Reaction: 
+                      // Old: Push away from 0 towards -1 or 1 (Bistability)
+                      // New: Weaker bistability to allow for gray areas (complex behaviors)
+                      const reaction = (current - current * current * current) * 0.02;
                       
                       // 3. Small stochastic drift (Mutation)
                       let mutation = 0;
@@ -177,14 +179,19 @@ const App: React.FC = () => {
 
                       let target = current + diffusion + reaction + mutation;
 
-                      // 4. Global bias correction (prevent all-green takeover)
-                      // If the local area is too positive (too attractive), introduce repulsion
-                      if (neighborAvg > 0.2) {
-                          target -= 0.05; // Constant pressure towards repulsion to break clumps
+                      // 4. Centering Force (Decay)
+                      // This prevents the matrix from becoming a solid block of Red or Green.
+                      // It constantly pulls values slightly towards 0.
+                      target -= current * 0.01;
+
+                      // 5. Pattern Bias
+                      // If a local area becomes too saturated (too ordered), disrupt it.
+                      if (Math.abs(neighborAvg) > 0.4) {
+                           target -= neighborAvg * 0.1; // Negative feedback loop
                       }
 
                       // Smooth temporal update
-                      const lerpSpeed = 0.2; 
+                      const lerpSpeed = 0.1; 
                       nextRules[i][j] = current + (target - current) * lerpSpeed;
                       
                       // Hard Clamp
@@ -205,20 +212,20 @@ const App: React.FC = () => {
               const baseForce = DEFAULT_PARAMS.forceFactor;
               let adaptationMult = 1.0;
               
-              // Stabilize energy
-              if (avgMagnitude > 0.6) {
-                   adaptationMult = 0.5 / avgMagnitude; 
-              } else if (avgMagnitude < 0.2) {
-                   adaptationMult = 1.3;
+              // Stabilize energy - if rules are weak, boost force. If rules are strong, lower force.
+              if (avgMagnitude > 0.5) {
+                   adaptationMult = 0.5; 
+              } else if (avgMagnitude < 0.1) {
+                   adaptationMult = 2.0;
               }
               
               const targetForce = baseForce * adaptationMult;
               
               // Only update if difference is significant to avoid React thrashing
-              if (Math.abs(targetForce - params.forceFactor) > 0.02) {
+              if (Math.abs(targetForce - params.forceFactor) > 0.05) {
                   setParams(p => ({
                       ...p,
-                      forceFactor: p.forceFactor + (targetForce - p.forceFactor) * 0.05
+                      forceFactor: p.forceFactor + (targetForce - p.forceFactor) * 0.1
                   }));
               }
           }

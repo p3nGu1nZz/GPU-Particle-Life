@@ -52,8 +52,8 @@ const BLOCK_SIZE = 256u;
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
 
-fn hash(p: vec2f, time: f32) -> f32 {
-    return fract(sin(dot(p, vec2f(12.9898, 78.233)) + time) * 43758.5453);
+fn hash(p: vec2f) -> f32 {
+    return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
 }
 
 @compute @workgroup_size(256)
@@ -63,10 +63,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
     let rMax = params.rMax;
     let rMin = params.minDist;
-    let range = max(0.0001, rMax - rMin); 
-    let mid = (rMax + rMin) * 0.5;
+    // Ensure rMin isn't too close to zero to avoid division issues
+    let safeRMin = max(0.001, rMin);
+    
+    let range = max(0.0001, rMax - safeRMin); 
+    let mid = (rMax + safeRMin) * 0.5;
     let rangeFactor = 2.0 / range; 
-    let rMinInv = 1.0 / max(0.0001, rMin);
+    let rMinInv = 1.0 / safeRMin;
     let forceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
 
@@ -130,18 +133,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
                 if (dist > 0.0 && dist < rMax) {
                     var f = 0.0;
-                    if (dist < rMin) {
-                        // REVISED REPULSION
-                        // Was: -3.0 * (1.0 - dist/rMin)
-                        // New: -8.0 * (1.0 - dist/rMin)
-                        // This stronger scalar ensures that short-range repulsion 
-                        // overpowers the accumulation of long-range attraction from multiple neighbors.
+                    if (dist < safeRMin) {
+                        // Repulsion force
                         let relDist = dist * rMinInv;
-                        f = -8.0 * (1.0 - relDist); 
+                        // Smooth but strong repulsion curve
+                        f = -4.0 * (1.0 - relDist); 
                         
-                        if (growthEnabled && dist < 0.05) {
-                            let randVal = hash(myPos + vec2f(f32(j), params.time), params.time);
-                            if (randVal < 0.01) { newColor = tile_color[j]; }
+                        // Growth logic (Infection)
+                        // Uses index and time step to avoid coherent waves
+                        if (growthEnabled && dist < 0.02) {
+                             // Probability check
+                             // params.time is float seconds. floor(time*10) makes it change 10 times a sec
+                             let t = floor(params.time * 2.0); 
+                             let randVal = hash(vec2f(f32(j) + t, f32(index)));
+                             if (randVal < 0.01) { newColor = tile_color[j]; }
                         }
                     } else {
                         let otherType = i32(round(tile_color[j]));
