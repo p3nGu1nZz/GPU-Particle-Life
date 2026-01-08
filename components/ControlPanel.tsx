@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout, MousePointer2 } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -420,8 +420,9 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                 </div>
 
                 {/* Footer */}
-                <div className="p-4 border-t border-white/10 text-[10px] text-neutral-500 text-center flex-shrink-0">
-                    Matrix forces evolve naturally.
+                <div className="p-4 border-t border-white/10 flex-shrink-0 flex items-center justify-center space-x-2 text-neutral-500">
+                    <MousePointer2 className="w-3 h-3" />
+                    <span className="text-[10px]">L-Click to Repel • R-Click to Attract</span>
                 </div>
             </div>
         </>

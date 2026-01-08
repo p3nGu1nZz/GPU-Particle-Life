@@ -1,3 +1,4 @@
+
 export type RuleMatrix = number[][];
 
 export type GPUPreference = 'default' | 'high-performance' | 'low-power';
@@ -17,6 +18,9 @@ export interface SimulationParams {
     baseColorOpacity: number;
     numTypes: number; // Dynamic number of particle types
     growth: boolean; // Biological growth/infection mechanic
+    // Interaction fields (handled internally by engine usually, but good to have in type)
+    mouseInteractionRadius: number;
+    mouseInteractionForce: number;
 }
 
 export interface WorkerMessage {

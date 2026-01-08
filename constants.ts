@@ -23,8 +23,10 @@ function rgbToHex(r: number, g: number, b: number): string {
 const generateColors = (count: number): ColorDefinition[] => {
     const colors: ColorDefinition[] = [];
     for (let i = 0; i < count; i++) {
-        const hue = (i * 360) / count;
-        const { r, g, b } = hslToRgb(hue, 100, 50);
+        // Use a golden ratio offset for better color distribution across 64 types
+        const golden_ratio_conjugate = 0.618033988749895;
+        const hue = (i * golden_ratio_conjugate * 360) % 360;
+        const { r, g, b } = hslToRgb(hue, 95, 55);
         colors.push({ 
             r, g, b, 
             name: rgbToHex(r, g, b)
@@ -33,23 +35,26 @@ const generateColors = (count: number): ColorDefinition[] => {
     return colors;
 };
 
-export const DEFAULT_COLORS: ColorDefinition[] = generateColors(32);
+// Increased to 64 for more complex emergent structures
+export const DEFAULT_COLORS: ColorDefinition[] = generateColors(64);
 
 export const DEFAULT_PARAMS: SimulationParams = {
     particleCount: 16000,
-    friction: 0.82,     // Increased to preserve momentum (0.82 retained velocity per frame)
+    friction: 0.86,     // Reduced drag (higher value) to allow particles to orbit instead of collapsing
     dt: 0.02,       
-    rMax: 0.12,         // Significantly reduced for tighter local clusters
-    forceFactor: 0.40,  // Increased force to balance smaller radius
-    minDistance: 0.04,  // Reduced to allow tighter packing
-    particleSize: 2.5,  // Increased to 2.5 for better visibility with glow shader
+    rMax: 0.15,         // Reduced slightly to limit the number of attracting neighbors
+    forceFactor: 0.50,  // Moderate force
+    minDistance: 0.07,  // Increased core size to enforce spacing
+    particleSize: 2.5,  
     trails: false,
     dpiScale: 1.0,
     gpuPreference: 'high-performance',
     blendMode: 'additive',
     baseColorOpacity: 1.0,
-    numTypes: 32, 
-    growth: true, // Enabled by default
+    numTypes: 64, 
+    growth: true,
+    mouseInteractionRadius: 0.3,
+    mouseInteractionForce: 5.0, 
 };
 
 // Generate a blank matrix (all zeros)
@@ -57,4 +62,4 @@ const generateBlankRules = (size: number): RuleMatrix => {
     return Array(size).fill(0).map(() => Array(size).fill(0));
 };
 
-export const DEFAULT_RULES: RuleMatrix = generateBlankRules(32);
+export const DEFAULT_RULES: RuleMatrix = generateBlankRules(64);

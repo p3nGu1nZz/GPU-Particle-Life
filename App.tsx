@@ -17,7 +17,7 @@ const App: React.FC = () => {
   
   const [isPaused, setIsPaused] = useState(false);
   const [isMutating, setIsMutating] = useState(true); // Evolve on by default
-  const [mutationRate, setMutationRate] = useState(0.10); // Control how fast the matrix evolves
+  const [mutationRate, setMutationRate] = useState(0.05); // Lower default mutation rate for stability
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
   // Initialize WebGPU Engine
@@ -125,28 +125,26 @@ const App: React.FC = () => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
 
-  // --- Neural / Organic Matrix Evolution ---
+  // --- Adaptive Physics & Enhanced Matrix Evolution ---
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
       const evolutionInterval = setInterval(() => {
+          
+          let totalMagnitude = 0;
+          let totalCells = 0;
+          
           setRules(prevRules => {
               const size = prevRules.length;
               const nextRules = prevRules.map(row => [...row]);
               
-              // ALGORITHM: Reaction-Diffusion Cellular Automata
-              // Inspired by Conway's Game of Life and Neural Networks (Activation Functions)
-              
               for(let i = 0; i < size; i++) {
                   for(let j = 0; j < size; j++) {
                       
-                      // 1. Convolution (3x3 Neighbor Sensing)
-                      // We gather influence from the "neighborhood" of this interaction rule.
-                      // If 'i' interacts with 'j', we check how neighbors of 'i' interact with neighbors of 'j'.
-                      // This builds structured relationships (transitive properties).
                       let neighborSum = 0;
                       let count = 0;
-
+                      
+                      // Convolution (3x3)
                       for(let di = -1; di <= 1; di++) {
                           for(let dj = -1; dj <= 1; dj++) {
                               if (di === 0 && dj === 0) continue;
@@ -154,9 +152,7 @@ const App: React.FC = () => {
                               const ni = (i + di + size) % size;
                               const nj = (j + dj + size) % size;
                               
-                              // Weight direct neighbors (up/down/left/right) higher than diagonals
                               const weight = (Math.abs(di) + Math.abs(dj) === 1) ? 1.0 : 0.7;
-                              
                               neighborSum += prevRules[ni][nj] * weight;
                               count += weight;
                           }
@@ -164,48 +160,79 @@ const App: React.FC = () => {
                       
                       const neighborAvg = neighborSum / count;
                       const current = prevRules[i][j];
-
-                      // 2. Neural Activation (Non-linearity)
-                      // Instead of linear averaging, we use Tanh.
-                      // This pushes values towards -1 or 1, creating "decisive" rules.
-                      // It prevents the matrix from becoming a grey soup of 0.1 values.
-                      const socialPressure = neighborAvg * 1.5; // Gain factor
-                      const inertia = current * 0.8;
                       
-                      // Calculate target value based on neighborhood and self
-                      let target = Math.tanh(socialPressure + inertia);
-
-                      // 3. Gated Mutation (Game of Life Style)
-                      // Low mutation rate: Subtle drift
-                      // High mutation rate: Random re-rolls
-                      if (Math.random() < mutationRate * 0.2) {
-                          // "Spontaneous Generation": 
-                          // If a rule is very weak (near 0), it's "dead". Randomly respawn it strongly.
-                          if (Math.abs(current) < 0.1) {
-                              target = (Math.random() * 2 - 1); 
-                          } else {
-                              // Standard drift
-                              target += (Math.random() - 0.5) * 0.5;
-                          }
+                      // --- Smoother Turing-like Evolution ---
+                      
+                      // 1. Diffusion: Pull towards neighbors
+                      const diffusion = (neighborAvg - current) * 0.1;
+                      
+                      // 2. Reaction: Push away from 0 towards stable states (-1 or 1)
+                      const reaction = (current - current * current * current) * 0.05;
+                      
+                      // 3. Small stochastic drift (Mutation)
+                      let mutation = 0;
+                      if (Math.random() < mutationRate * 0.01) {
+                          mutation = (Math.random() - 0.5) * 0.5;
                       }
 
-                      // 4. Time Integration (Smoothness)
-                      // Interpolate towards the target to prevent jitter
-                      const lerpSpeed = 0.1; 
+                      let target = current + diffusion + reaction + mutation;
+
+                      // 4. Global bias correction (prevent all-green takeover)
+                      // If the local area is too positive (too attractive), introduce repulsion
+                      if (neighborAvg > 0.2) {
+                          target -= 0.05; // Constant pressure towards repulsion to break clumps
+                      }
+
+                      // Smooth temporal update
+                      const lerpSpeed = 0.2; 
                       nextRules[i][j] = current + (target - current) * lerpSpeed;
+                      
+                      // Hard Clamp
+                      nextRules[i][j] = Math.max(-1, Math.min(1, nextRules[i][j]));
+                      
+                      // Stats for Physics
+                      totalMagnitude += Math.abs(nextRules[i][j]);
+                      totalCells++;
                   }
               }
               return nextRules;
           });
-      }, 100); // Update 10 times a second
+          
+          // Apply Adaptive Physics
+          if (totalCells > 0) {
+              const avgMagnitude = totalMagnitude / totalCells;
+              
+              const baseForce = DEFAULT_PARAMS.forceFactor;
+              let adaptationMult = 1.0;
+              
+              // Stabilize energy
+              if (avgMagnitude > 0.6) {
+                   adaptationMult = 0.5 / avgMagnitude; 
+              } else if (avgMagnitude < 0.2) {
+                   adaptationMult = 1.3;
+              }
+              
+              const targetForce = baseForce * adaptationMult;
+              
+              // Only update if difference is significant to avoid React thrashing
+              if (Math.abs(targetForce - params.forceFactor) > 0.02) {
+                  setParams(p => ({
+                      ...p,
+                      forceFactor: p.forceFactor + (targetForce - p.forceFactor) * 0.05
+                  }));
+              }
+          }
+
+      }, 100); 
 
       return () => clearInterval(evolutionInterval);
-  }, [isMutating, isPaused, mutationRate]);
+  }, [isMutating, isPaused, mutationRate, params.forceFactor]);
 
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;
-    const newRules = Array(num).fill(0).map(() => 
-         Array(num).fill(0).map(() => Math.random() * 2 - 1)
+    // Initialize with smooth noise (Perlin-ish) for better start than white noise
+    const newRules = Array(num).fill(0).map((_, y) => 
+         Array(num).fill(0).map((_, x) => Math.sin(x * 0.1) * Math.cos(y * 0.1) + (Math.random() - 0.5))
     );
     setRules(newRules);
   }, [colors.length]);

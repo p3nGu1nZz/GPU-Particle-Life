@@ -23,6 +23,7 @@ struct Particle {
     pad2: f32,
 };
 
+// Aligned to 16 floats (64 bytes)
 struct Params {
     width: f32,
     height: f32,
@@ -35,23 +36,22 @@ struct Params {
     size: f32,
     opacity: f32,
     numTypes: f32,
-    time: f32,     // For randomness
-    growth: f32,   // Boolean flag (1.0 or 0.0)
+    time: f32,     
+    growth: f32,
+    mouseX: f32,
+    mouseY: f32,
+    mouseType: f32, // 0 = none, 1 = repel, -1 = attract
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> rules: array<f32>; 
 @group(0) @binding(2) var<uniform> params: Params;
 
-// Performance Optimization: 
-// Workgroup size 256 is generally more efficient for occupancy.
-// We use Shared Memory (var<workgroup>) to reduce Global Memory traffic.
 const BLOCK_SIZE = 256u;
 
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
 
-// Pseudo-random generator
 fn hash(p: vec2f, time: f32) -> f32 {
     return fract(sin(dot(p, vec2f(12.9898, 78.233)) + time) * 43758.5453);
 }
@@ -61,110 +61,107 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let index = global_id.x;
     let particleCount = u32(params.count);
 
+    let rMax = params.rMax;
+    let rMin = params.minDist;
+    let range = max(0.0001, rMax - rMin); 
+    let mid = (rMax + rMin) * 0.5;
+    let rangeFactor = 2.0 / range; 
+    let rMinInv = 1.0 / max(0.0001, rMin);
+    let forceFactor = params.forceFactor;
+    let growthEnabled = params.growth > 0.5;
+
     var myPos = vec2f(0.0);
     var myColor = 0.0;
     
-    // 1. Load Self Data
     if (index < particleCount) {
         let p = particles[index];
         myPos = p.pos;
         myColor = p.color;
     }
 
-    // 2. Pre-load Rules into Registers
-    // Optimization: Cache row of rules for this particle type to avoid N lookups in storage buffer
     let numTypes = i32(params.numTypes);
     let myType = i32(round(myColor));
-    var myRules: array<f32, 32>; // Supports up to 32 types
-    
-    if (index < particleCount) {
-        for (var t = 0; t < numTypes; t++) {
-            // rules flat index: row * width + col
-            myRules[t] = rules[myType * numTypes + t];
+    let ruleRowOffset = myType * numTypes;
+
+    var force = vec2f(0.0, 0.0);
+    var newColor = myColor; 
+
+    // --- Mouse Interaction ---
+    if (params.mouseType != 0.0) {
+        let mousePos = vec2f(params.mouseX, params.mouseY);
+        var dm = myPos - mousePos;
+        
+        // Wrap mouse distance (so mouse affects particles across the edge)
+        dm = dm - 2.0 * round(dm / 2.0);
+        
+        let distM = length(dm);
+        let mouseRadius = 0.4;
+        
+        if (distM < mouseRadius) {
+            let mForce = (1.0 - distM / mouseRadius) * 5.0; // Strong force
+            // params.mouseType: 1.0 (Repel), -1.0 (Attract)
+            force += (dm / (distM + 0.001)) * mForce * params.mouseType;
         }
     }
 
-    var force = vec2f(0.0, 0.0);
-    var newColor = myColor; // For growth/infection
-    let growthEnabled = params.growth > 0.5;
-
-    // 3. Tiled N-Body Calculation
-    // Iterate over particles in chunks (tiles) of BLOCK_SIZE
+    // --- Tiled N-Body Calculation ---
     for (var i = 0u; i < particleCount; i += BLOCK_SIZE) {
-        
-        // --- Phase A: Collaborative Loading into Shared Memory ---
         let tile_idx = i + local_id.x;
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
             tile_pos[local_id.x] = p.pos;
             tile_color[local_id.x] = p.color;
         } else {
-            // Pad with dummy data far away so it doesn't affect force
             tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
             tile_color[local_id.x] = 0.0;
         }
 
-        workgroupBarrier(); // Wait for all threads to load the tile
+        workgroupBarrier(); 
 
-        // --- Phase B: Compute Forces using Shared Memory ---
         if (index < particleCount) {
-            // How many particles in this tile are valid?
             let limit = min(BLOCK_SIZE, particleCount - i);
-            
             for (var j = 0u; j < BLOCK_SIZE; j++) {
-                if (j >= limit) { break; } // Stop if we hit end of valid data in last tile
+                if (j >= limit) { break; } 
 
                 let otherPos = tile_pos[j];
                 var d = otherPos - myPos;
-
-                // Branchless Torus Wrap
-                // This eliminates 4 branches per interaction, significantly improving performance.
                 d = d - 2.0 * round(d / 2.0);
-
                 let dist = length(d);
 
-                if (dist > 0.0 && dist < params.rMax) {
-                    let otherType = i32(round(tile_color[j]));
-                    let ruleVal = myRules[otherType]; // Register lookup
-                    
+                if (dist > 0.0 && dist < rMax) {
                     var f = 0.0;
-                    if (dist < params.minDist) {
-                        f = -1.0 * (1.0 - dist / params.minDist) * 3.0; 
+                    if (dist < rMin) {
+                        // REVISED REPULSION
+                        // Was: -3.0 * (1.0 - dist/rMin)
+                        // New: -8.0 * (1.0 - dist/rMin)
+                        // This stronger scalar ensures that short-range repulsion 
+                        // overpowers the accumulation of long-range attraction from multiple neighbors.
+                        let relDist = dist * rMinInv;
+                        f = -8.0 * (1.0 - relDist); 
                         
-                        // --- Biological Growth (Infection) ---
-                        // If very close (touching), chance to copy neighbor's color
                         if (growthEnabled && dist < 0.05) {
                             let randVal = hash(myPos + vec2f(f32(j), params.time), params.time);
-                            // Increased probability (0.01) for faster, more visible organic growth
-                            if (randVal < 0.01) { 
-                                newColor = tile_color[j];
-                            }
+                            if (randVal < 0.01) { newColor = tile_color[j]; }
                         }
-
                     } else {
-                        let numer = abs(2.0 * dist - params.rMax - params.minDist);
-                        let denom = params.rMax - params.minDist;
-                        f = ruleVal * (1.0 - numer / denom);
+                        let otherType = i32(round(tile_color[j]));
+                        let ruleVal = rules[ruleRowOffset + otherType]; 
+                        let strength = 1.0 - abs(dist - mid) * rangeFactor;
+                        f = ruleVal * strength;
                     }
-
-                    force += (d / dist) * f * params.forceFactor;
+                    force += (d / dist) * f * forceFactor;
                 }
             }
         }
-        
-        workgroupBarrier(); // Wait for computation before overwriting shared memory with next tile
+        workgroupBarrier();
     }
 
-    // 4. Update Physics
     if (index < particleCount) {
         var p = particles[index];
         p.vel = (p.vel + force * params.dt) * params.friction;
         p.pos += p.vel * params.dt;
-        p.color = newColor; // Apply potential color change
-
-        // Branchless Wrap Position
+        p.color = newColor; 
         p.pos = p.pos - 2.0 * round(p.pos / 2.0);
-
         particles[index] = p;
     }
 }
@@ -200,6 +197,9 @@ struct Params {
     numTypes: f32,
     time: f32,
     growth: f32,
+    mouseX: f32,
+    mouseY: f32,
+    mouseType: f32,
 };
 
 struct Color {
@@ -217,7 +217,6 @@ fn vs_main(
 ) -> VertexOutput {
     let p = particles[iIdx];
     
-    // Calculate Size
     let sizeNDC = (params.size / params.width) * 2.0;
     
     var offsets = array<vec2f, 6>(
@@ -227,7 +226,7 @@ fn vs_main(
     
     let offset = offsets[vIdx] * sizeNDC;
     
-    // Correct aspect ratio
+    // Correction for aspect ratio in Vertex Shader so particles are round
     let w = select(params.width, 1.0, params.width == 0.0);
     let h = select(params.height, 1.0, params.height == 0.0);
     let aspect = w / h;
@@ -241,9 +240,7 @@ fn vs_main(
     output.position = vec4f(pos, 0.0, 1.0);
     output.uv = offsets[vIdx]; 
 
-    // Dynamic Color Fetch
     let cType = i32(round(p.color));
-    // Retrieve color from buffer. Normalized 0-1 from CPU
     let colorData = colors[cType];
     output.color = vec4f(colorData.r, colorData.g, colorData.b, 1.0);
     
@@ -252,34 +249,18 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-    let dSq = dot(input.uv, input.uv); // Squared distance
+    let dSq = dot(input.uv, input.uv); 
     if (dSq > 1.0) {
         discard;
     }
     
-    // Dual-Layer Glow Model for realistic light emission
-    
-    // 1. Core: Intense, tight falloff (k=10.0)
-    // Represents the physical source of the particle
     let core = exp(-10.0 * dSq);
-    
-    // 2. Halo: Soft, wide falloff (k=2.0)
-    // Represents the atmospheric/lens glow
     let halo = exp(-2.0 * dSq);
-    
-    // Combine: Maximize to ensure the core is always solid, 
-    // while the halo adds the soft edge.
     let signal = max(core, halo * 0.4);
-    
     let alpha = signal * params.opacity;
-    
-    // Hot Center Effect
-    // Mix towards white in the very center (high core intensity)
-    // to simulate light intensity saturation (overexposure).
     let whiteMix = smoothstep(0.5, 1.0, core);
     let finalColor = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteMix * 0.65);
     
-    // Premultiplied Alpha Output
     return vec4f(finalColor * alpha, alpha);
 }
 `;
@@ -323,9 +304,61 @@ export class SimulationEngine {
     private frameCount: number = 0;
     private adapterInfo: string = "";
 
+    // Mouse Tracking
+    private mouseX: number = 0;
+    private mouseY: number = 0;
+    private mouseInteractionType: number = 0; // 0=none, 1=repel, -1=attract
+
     constructor(canvas: HTMLCanvasElement, onFpsUpdate?: (fps: number) => void) {
         this.canvas = canvas;
         this.onFpsUpdate = onFpsUpdate;
+        this.setupInputHandlers();
+    }
+
+    private setupInputHandlers() {
+        // Map screen pixels to simulation space (-1 to 1)
+        // Note: Canvas Y is down, Simulation Y is up (in most GPU math), but here
+        // our Vertex Shader maps -1 to bottom? 
+        // Let's verify: vs_main uses p.pos + offset. 
+        // Clip space: (-1,-1) is bottom-left. 
+        // Canvas event: (0,0) is top-left.
+        // So Y needs inverting.
+        
+        const updateMouse = (e: MouseEvent) => {
+            const rect = this.canvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left) / rect.width;
+            const y = (e.clientY - rect.top) / rect.height;
+            
+            // Map 0..1 to -1..1
+            this.mouseX = x * 2.0 - 1.0;
+            this.mouseY = -(y * 2.0 - 1.0); // Invert Y
+        };
+
+        this.canvas.addEventListener('mousemove', (e) => {
+            updateMouse(e);
+        });
+
+        this.canvas.addEventListener('mousedown', (e) => {
+            updateMouse(e);
+            // Left click (0) = Repel (1), Right click (2) = Attract (-1)
+            if (e.button === 0) {
+                this.mouseInteractionType = 1.0;
+            } else if (e.button === 2) {
+                this.mouseInteractionType = -1.0;
+            }
+        });
+
+        this.canvas.addEventListener('mouseup', () => {
+            this.mouseInteractionType = 0;
+        });
+        
+        this.canvas.addEventListener('mouseleave', () => {
+            this.mouseInteractionType = 0;
+        });
+
+        this.canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault(); // Prevent context menu on right click
+        });
     }
 
     async init(params: SimulationParams, rules: RuleMatrix, colors: ColorDefinition[]) {
@@ -354,13 +387,11 @@ export class SimulationEngine {
 
         this.resize(this.canvas.clientWidth || window.innerWidth, this.canvas.clientHeight || window.innerHeight);
 
-        // 1. Create Buffers
         this.createParticleBuffer();
         this.createRulesBuffer(rules);
         this.createParamsBuffer(params);
         this.createColorBuffer(colors);
 
-        // 2. Create Pipelines
         const computeModule = this.device.createShaderModule({ code: COMPUTE_SHADER });
         this.computePipeline = this.device.createComputePipeline({
             layout: 'auto',
@@ -404,10 +435,7 @@ export class SimulationEngine {
             primitive: { topology: 'triangle-list' },
         });
 
-        // 3. Create BindGroups
         this.updateBindGroups();
-
-        // 4. Start Loop
         this.start();
         
         return this.adapterInfo;
@@ -435,7 +463,7 @@ export class SimulationEngine {
             data[i*8 + 1] = Math.random() * 2 - 1;
             data[i*8 + 2] = 0;
             data[i*8 + 3] = 0;
-            data[i*8 + 4] = Math.floor(Math.random() * this.numTypes); // Random type based on current numTypes
+            data[i*8 + 4] = Math.floor(Math.random() * this.numTypes);
         }
 
         this.particleBuffer = this.device.createBuffer({
@@ -461,11 +489,8 @@ export class SimulationEngine {
 
     private createColorBuffer(colors: ColorDefinition[]) {
         if (!this.device) return;
-        // 4 floats per color (r,g,b,a)
         const data = new Float32Array(colors.length * 4);
         for(let i=0; i<colors.length; i++) {
-            // Check if user provided RGB or we need to parse hex/string. 
-            // Simplified: The ColorDefinition type has r,g,b numbers.
             data[i*4 + 0] = colors[i].r / 255.0;
             data[i*4 + 1] = colors[i].g / 255.0;
             data[i*4 + 2] = colors[i].b / 255.0;
@@ -487,6 +512,7 @@ export class SimulationEngine {
         const scaledWidth = this.windowWidth * this.dpiScale;
         const scaledHeight = this.windowHeight * this.dpiScale;
 
+        // Exactly 16 floats (64 bytes)
         const data = new Float32Array([
             scaledWidth,
             scaledHeight,
@@ -499,9 +525,11 @@ export class SimulationEngine {
             params.particleSize,
             params.baseColorOpacity,
             params.numTypes,
-            0.0, // Time
-            params.growth ? 1.0 : 0.0, // Growth flag
-            0.0 // Padding
+            0.0, // time
+            params.growth ? 1.0 : 0.0,
+            0.0, // mouseX (initially 0)
+            0.0, // mouseY (initially 0)
+            0.0, // mouseType (initially 0)
         ]);
         this.paramsData = data;
 
@@ -569,6 +597,8 @@ export class SimulationEngine {
             this.resize(this.windowWidth, this.windowHeight);
         }
 
+        // Only update the static physics params.
+        // Mouse coords are updated in the loop.
         this.paramsData[0] = this.windowWidth * this.dpiScale;
         this.paramsData[1] = this.windowHeight * this.dpiScale;
         this.paramsData[2] = params.friction;
@@ -581,6 +611,8 @@ export class SimulationEngine {
         this.paramsData[9] = params.baseColorOpacity;
         this.paramsData[10] = params.numTypes;
         this.paramsData[12] = params.growth ? 1.0 : 0.0;
+        
+        // Don't overwrite mouse data here
 
         this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
         
@@ -658,24 +690,24 @@ export class SimulationEngine {
         
         if (this.isPaused || !this.device || !this.context || !this.computePipeline || !this.pipelineAdditive || !this.renderTarget) return;
 
-        // Update time uniform for randomness
         if (this.paramsData && this.paramsBuffer) {
             this.paramsData[11] = timestamp / 1000.0;
+            // Update Mouse Data per frame
+            this.paramsData[13] = this.mouseX;
+            this.paramsData[14] = this.mouseY;
+            this.paramsData[15] = this.mouseInteractionType;
+
             this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
         }
 
         const commandEncoder = this.device.createCommandEncoder();
 
-        // 1. Compute Pass
         const computePass = commandEncoder.beginComputePass();
         computePass.setPipeline(this.computePipeline);
         computePass.setBindGroup(0, this.computeBindGroup!);
-        
         computePass.dispatchWorkgroups(Math.ceil(this.particleCount / 256));
-        
         computePass.end();
 
-        // 2. Render Pass
         const shouldClear = this.textureNeedsClear || !this.trailsEnabled;
         
         const renderPass = commandEncoder.beginRenderPass({
@@ -697,7 +729,6 @@ export class SimulationEngine {
         renderPass.draw(6, this.particleCount);
         renderPass.end();
 
-        // 3. Copy to Swap Chain
         const currentTexture = this.context.getCurrentTexture();
         commandEncoder.copyTextureToTexture(
             { texture: this.renderTarget },
