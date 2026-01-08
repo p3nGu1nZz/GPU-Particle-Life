@@ -75,6 +75,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let particleCount = u32(params.count);
 
     let rMax = params.rMax;
+    let rMaxSq = rMax * rMax; // Pre-calculate square for optimization
     let rMin = params.minDist;
     // Ensure rMin isn't too close to zero to avoid division issues
     let safeRMin = max(0.001, rMin);
@@ -83,7 +84,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let mid = (rMax + safeRMin) * 0.5;
     let rangeFactor = 2.0 / range; 
     let rMinInv = 1.0 / safeRMin;
-    let forceFactor = params.forceFactor;
+    let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
 
     var myPos = vec2f(0.0);
@@ -97,10 +98,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
     let numTypes = i32(params.numTypes);
     let myType = i32(round(myColor));
+    
+    // --- CACHE OPTIMIZATION START ---
+    // Pre-load the specific rule row for this particle's type into a private array (register cache).
+    // This avoids accessing the global storage buffer 'rules' inside the hot N-body loop.
+    var typeRules: array<f32, 64>;
     let ruleRowOffset = myType * numTypes;
+    
+    // Unrolled copy (WGSL loop bounds must be uniform or constant ideally, but this works)
+    for (var k = 0; k < 64; k++) {
+        if (k < numTypes) {
+            typeRules[k] = rules[ruleRowOffset + k];
+        } else {
+            typeRules[k] = 0.0;
+        }
+    }
+    // --- CACHE OPTIMIZATION END ---
 
     var force = vec2f(0.0, 0.0);
     var newColor = myColor; 
+    
+    // Adaptive Physics Accumulator
+    var localDensity = 0.0; 
 
     // --- Mouse Interaction ---
     if (params.mouseType != 0.0) {
@@ -141,9 +160,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 let otherPos = tile_pos[j];
                 var d = otherPos - myPos;
                 d = d - 2.0 * round(d / 2.0);
-                let dist = length(d);
+                
+                // --- OPTIMIZATION: Distance Squared Check ---
+                // Avoid sqrt() for particles that are too far away.
+                let d2 = dot(d, d);
 
-                if (dist > 0.0 && dist < rMax) {
+                if (d2 > 0.000001 && d2 < rMaxSq) {
+                    let dist = sqrt(d2);
+                    
+                    // Accumulate Local Density (used for adaptive physics)
+                    localDensity += (1.0 - dist / rMax);
+
                     var f = 0.0;
                     if (dist < safeRMin) {
                         // Repulsion force
@@ -159,21 +186,40 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                         }
                     } else {
                         let otherType = i32(round(tile_color[j]));
-                        let ruleVal = rules[ruleRowOffset + otherType]; 
+                        
+                        // Optimized Lookup using private cache
+                        let safeType = clamp(otherType, 0, numTypes - 1);
+                        let ruleVal = typeRules[safeType]; 
+
                         let strength = 1.0 - abs(dist - mid) * rangeFactor;
                         f = ruleVal * strength;
                     }
-                    force += (d / dist) * f * forceFactor;
+                    force += (d / dist) * f * baseForceFactor;
                 }
             }
         }
         workgroupBarrier();
     }
 
-    // --- Entropy / Temperature (Boltzmann-like thermal noise) ---
+    // --- Adaptive Physics Implementation ---
     if (index < particleCount) {
+        // Normalize density roughly based on typical neighborhood
+        let densityFactor = smoothstep(5.0, 30.0, localDensity);
+
+        // 1. Adaptive Friction (Viscosity)
+        // As density increases, friction increases (velocity dampening becomes stronger)
+        let viscosity = mix(params.friction, params.friction * 0.8, densityFactor);
+
+        // 2. Adaptive Temperature
+        // High density areas generate "pressure heat" -> more noise to break up clumps
+        let adaptiveTemp = params.temperature * (1.0 + densityFactor * 0.5);
         let seed = myPos + vec2f(params.time, f32(index) * 0.01);
-        let thermalForce = rand2(seed) * params.temperature;
+        let thermalForce = rand2(seed) * adaptiveTemp;
+        
+        // 3. Pressure Damping
+        // If density is very high, reduce the effective total force to prevent explosions
+        force *= (1.0 - densityFactor * 0.3);
+
         force += thermalForce;
 
         // Force Clamping to prevent jitter/explosion
@@ -184,7 +230,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         }
 
         var p = particles[index];
-        p.vel = (p.vel + force * params.dt) * params.friction;
+        p.vel = (p.vel + force * params.dt) * viscosity;
         p.pos += p.vel * params.dt;
         p.color = newColor; 
         p.pos = p.pos - 2.0 * round(p.pos / 2.0);
@@ -244,29 +290,34 @@ fn vs_main(
 ) -> VertexOutput {
     let p = particles[iIdx];
     
-    let sizeNDC = (params.size / params.width) * 2.0;
+    // Safety check for width/height
+    let w = max(1.0, params.width);
+    let h = max(1.0, params.height);
+    let aspect = w / h;
+
+    let sizeNDC = (params.size / w) * 2.0;
     
+    // Standard Quad
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
         vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
     );
     
-    let offset = offsets[vIdx] * sizeNDC;
+    let rawOffset = offsets[vIdx] * sizeNDC;
     
-    let w = select(params.width, 1.0, params.width == 0.0);
-    let h = select(params.height, 1.0, params.height == 0.0);
-    let aspect = w / h;
-    
-    var adjustedOffset = offset;
-    adjustedOffset.y = adjustedOffset.y * aspect;
+    var adjustedOffset = rawOffset;
+    adjustedOffset.y = rawOffset.y * aspect;
 
     let pos = p.pos + adjustedOffset;
 
     var output: VertexOutput;
     output.position = vec4f(pos, 0.0, 1.0);
-    output.uv = offsets[vIdx]; 
+    output.uv = offsets[vIdx];
 
-    let cType = i32(round(p.color));
+    // Safely clamp color index to prevent out-of-bounds crash
+    let maxType = i32(params.numTypes) - 1;
+    let cType = clamp(i32(round(p.color)), 0, maxType);
+    
     let colorData = colors[cType];
     output.color = vec4f(colorData.r, colorData.g, colorData.b, 1.0);
     
@@ -275,18 +326,30 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-    let dSq = dot(input.uv, input.uv); 
-    if (dSq > 1.0) {
-        discard;
+    let d2 = dot(input.uv, input.uv); 
+    
+    // Instead of discard, we can just return transparent
+    if (d2 > 1.0) {
+        return vec4f(0.0, 0.0, 0.0, 0.0);
     }
     
-    // Softer glow profile
-    let core = exp(-6.0 * dSq); 
-    let alpha = core * params.opacity;
-    let whiteMix = smoothstep(0.6, 1.0, core);
-    let finalColor = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteMix * 0.4);
+    // Enhanced Visuals: "Glowing Orb"
+    let core = exp(-8.0 * d2);
+    let halo = exp(-2.0 * d2);
+    let intensity = max(core, halo * 0.5);
     
-    return vec4f(finalColor * alpha, alpha);
+    // Anti-aliasing
+    let edgeFade = 1.0 - smoothstep(0.85, 1.0, d2);
+    
+    // Final alpha
+    let alpha = intensity * edgeFade * params.opacity;
+
+    // Hot Core Coloring
+    let whiteness = smoothstep(0.5, 1.0, core);
+    let finalRgb = mix(input.color.rgb, vec3f(1.0, 1.0, 1.0), whiteness * 0.4);
+    
+    // Pre-multiplied Alpha Output
+    return vec4f(finalRgb * alpha, alpha);
 }
 `;
 
