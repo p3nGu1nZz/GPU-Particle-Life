@@ -134,6 +134,19 @@ const App: React.FC = () => {
           
           setRules(prevRules => {
               const size = prevRules.length;
+
+              // 1. Calculate Global Average for Homeostasis
+              // This prevents the entire matrix from becoming all Green (attract) or all Red (repel)
+              let sum = 0;
+              for(let r=0; r<size; r++) {
+                  for(let c=0; c<size; c++) {
+                      sum += prevRules[r][c];
+                  }
+              }
+              const globalAvg = sum / (size * size);
+              // Push against the dominant color to maintain diversity
+              const homeostasisForce = -globalAvg * 0.15; 
+
               // Create new matrix
               const nextRules = new Array(size);
               
@@ -143,7 +156,7 @@ const App: React.FC = () => {
                       
                       let neighborSum = 0;
                       
-                      // 3x3 Convolution for localized CA-like behavior
+                      // 3x3 Convolution for localized structure (Cellular Automata-like)
                       const up = (i - 1 + size) % size;
                       const down = (i + 1) % size;
                       const left = (j - 1 + size) % size;
@@ -157,44 +170,38 @@ const App: React.FC = () => {
                       // Diagonal neighbors with lower weight
                       const diagSum = (prevRules[up][left] + prevRules[up][right] + prevRules[down][left] + prevRules[down][right]);
                       
-                      // Weighted Average: Center (4) + Orthogonal (1) + Diagonal (0.25)
-                      // Giving more weight to self-identity creates more stable species
                       const current = prevRules[i][j];
-                      const weightedAvg = (current * 4.0 + neighborSum + diagSum * 0.25) / 9.0;
-
-                      // Stochastic Update Logic
-                      // 1. Diffusion: Smooth out variations
-                      const diffusion = (weightedAvg - current) * 0.15;
                       
-                      // 2. Reaction: Push towards weak interactions to prevent locking
-                      // Minimal decay to keep system energetic
-                      const decay = -current * 0.0001; 
+                      // Calculate Local Average (Diffusion Target)
+                      const localAvg = (neighborSum + diagSum * 0.7) / 6.8; 
+                      
+                      // Diffusion: Smooth out variations locally
+                      const diffusion = (localAvg - current) * 0.1;
 
-                      // 3. Mutation: Random flips
+                      // Mutation: Random chance to flip
                       let mutation = 0;
-                      // Higher chance to mutate if cell is near zero (dormant)
-                      let chance = Math.abs(current) < 0.1 ? mutationRate * 0.15 : mutationRate * 0.02;
-                      
-                      if (Math.random() < chance) {
-                          mutation = (Math.random() - 0.5) * 0.8;
+                      if (Math.random() < mutationRate * 0.1) {
+                          mutation = (Math.random() - 0.5) * 0.5;
                       }
 
-                      let target = current + diffusion + decay + mutation;
+                      // Apply Forces
+                      let target = current + diffusion + mutation + homeostasisForce;
 
-                      // Soft clamp
+                      // Entropy / Decay:
+                      // Slowly pull values towards 0 to prevent getting stuck at -1 or 1 limits indefinitely
+                      target *= 0.99;
+
+                      // Clamp
                       if (target > 1.0) target = 1.0;
                       if (target < -1.0) target = -1.0;
                       
-                      // Snap really small values to zero
-                      if (Math.abs(target) < 0.005) target = 0;
-
                       nextRules[i][j] = target;
                   }
               }
               return nextRules;
           });
           
-      }, 300); // Slower interval for stability
+      }, 200); // 5 updates per second
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate]);

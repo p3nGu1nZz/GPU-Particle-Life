@@ -23,9 +23,17 @@ function rgbToHex(r: number, g: number, b: number): string {
 const generateColors = (count: number): ColorDefinition[] => {
     const colors: ColorDefinition[] = [];
     for (let i = 0; i < count; i++) {
-        const golden_ratio_conjugate = 0.618033988749895;
-        const hue = (i * golden_ratio_conjugate * 360) % 360;
-        const { r, g, b } = hslToRgb(hue, 95, 55);
+        // Use Golden Angle (approx 137.5 degrees) for optimal hue distribution
+        const hue = (i * 137.508) % 360;
+
+        // Vary Saturation and Lightness to distinctify adjacent colors
+        // Cycle saturation: 70, 85, 100
+        const s = 70 + (i % 3) * 15; 
+        
+        // Cycle lightness: 50, 60, 70
+        const l = 50 + (i % 3) * 10;
+
+        const { r, g, b } = hslToRgb(hue, s, l);
         colors.push({ 
             r, g, b, 
             name: rgbToHex(r, g, b)
