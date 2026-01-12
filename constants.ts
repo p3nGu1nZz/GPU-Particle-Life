@@ -43,24 +43,18 @@ export const DEFAULT_PARAMS: SimulationParams = {
     rMax: 0.1,          
     forceFactor: 0.4,   
     minDistance: 0.01,  
-    particleSize: 2.0,  
+    particleSize: 1.0,  
     trails: false,
     dpiScale: 1.0,
     gpuPreference: 'high-performance',
-    blendMode: 'additive',
+    blendMode: 'normal',
     baseColorOpacity: 0.8,
     numTypes: 64, 
-    growth: false,      
-    temperature: 1.0,   // Default thermal energy to prevent freezing
+    growth: true,      
+    temperature: 1.0,   
     mouseInteractionRadius: 0.3,
     mouseInteractionForce: 5.0, 
 };
 
-// Generate random rules so the matrix isn't black on start
-const generateRandomRules = (size: number): RuleMatrix => {
-    return Array(size).fill(0).map(() => 
-        Array(size).fill(0).map(() => (Math.random() * 2 - 1) * 0.5) 
-    );
-};
-
-export const DEFAULT_RULES: RuleMatrix = generateRandomRules(64);
+// Initialize with empty matrix (zeros) so simulation starts clean
+export const DEFAULT_RULES: RuleMatrix = Array(64).fill(0).map(() => Array(64).fill(0));

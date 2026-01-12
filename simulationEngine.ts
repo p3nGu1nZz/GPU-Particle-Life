@@ -125,15 +125,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var localDensity = 0.0; 
 
     // --- Optimization: Rule Caching ---
-    // Instead of performing a texture fetch for every interaction (N^2),
-    // we pre-load the rule row for 'myType' into private registers (N*Types).
-    // This moves the bottleneck from L1 Cache/Texture Units to ALU/Registers.
     var myRules: array<f32, 64>;
     let numTypes = u32(params.numTypes);
     
     for (var t = 0u; t < MAX_TYPES; t++) {
         if (t < numTypes) {
-             // Coordinate: (column=t, row=myType)
              myRules[t] = textureLoad(rulesTex, vec2u(t, myType), 0).r;
         } else {
              myRules[t] = 0.0;
@@ -160,7 +156,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
             tile_pos[local_id.x] = p.pos;
-            // Optimization: Cast to u32 once here, instead of N times in loop
             tile_type[local_id.x] = u32(round(p.color)); 
         } else {
             tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
@@ -179,7 +174,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 d = d - 2.0 * round(d / 2.0);
                 let d2 = dot(d, d);
 
-                // Optimization: Branching here is efficient as spatial locality usually means groups mostly take/skip together
                 if (d2 > 0.000001 && d2 < rMaxSq) {
                     let invDist = inverseSqrt(d2);
                     let dist = d2 * invDist; 
@@ -188,17 +182,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                     var f = 0.0;
                     if (dist < safeRMin) {
                         let relDist = dist * rMinInv;
-                        f = -4.0 * (1.0 - relDist); 
+                        // Softer repulsion core (was -4.0) to prevent jittery explosions
+                        f = -3.0 * (1.0 - relDist); 
                         if (growthEnabled && dist < 0.02) {
                              let t = floor(params.time * 2.0); 
                              let randVal = hash(vec2f(f32(j) + t, f32(index)));
                              if (randVal < 0.01) { 
-                                 // Cast back to f32 for storage
                                  newColor = f32(tile_type[j]); 
                              }
                         }
                     } else {
-                        // Optimization: Register Array Lookup
                         let otherType = tile_type[j]; 
                         let ruleVal = myRules[otherType];
 
@@ -214,51 +207,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
     // --- Adaptive Physics Implementation (Thermostat & Jamming) ---
     if (index < particleCount) {
-        var p = particles[index]; // Create mutable copy
+        var p = particles[index]; 
 
-        // 1. Calculate Local Pressure (Jamming potential)
-        // Values > 30.0 indicate high crowding/solid-like state
-        let pressure = smoothstep(5.0, 40.0, localDensity);
+        // 1. Calculate Local Pressure
+        // Lower threshold (5.0 -> 30.0) ensures jamming logic activates in loose clusters too
+        let pressure = smoothstep(5.0, 30.0, localDensity);
         
         // 2. Dynamic Viscosity (Jamming)
-        // In dense regions, particles "rub" together more, increasing effective drag.
-        // params.friction is a retention factor (0.9 means keep 90% velocity).
-        // Higher pressure -> Lower retention -> Higher Drag.
-        let dynamicViscosity = mix(params.friction, params.friction * 0.6, pressure);
+        // Stronger damping in dense regions (factor 0.2 instead of 0.6).
+        // This acts as a "glue" for colonies, significantly reducing jitter.
+        let dynamicViscosity = mix(params.friction, params.friction * 0.2, pressure);
         
         // 3. Statistical Mechanics Thermostat
-        // We calculate kinetic energy to regulate temperature dynamically.
         let speed = length(p.vel);
         let kineticEnergy = 0.5 * speed * speed;
         
-        // Phase Transition Logic:
-        // High density regions ("solids") need HIGHER temperature to melt/flow.
-        // Low density regions ("gas") need LOWER temperature to condense/form structures.
-        let targetTemp = params.temperature * (1.0 + pressure * 2.0);
+        // Reduced thermal heating in dense zones (factor 0.5 instead of 2.0).
+        // This allows solid structures to form without being "melted" by artificial heat.
+        let targetTemp = params.temperature * (1.0 + pressure * 0.5);
         
-        // Feedback Loop:
-        // If particle has high KE, add less noise (cool down).
-        // If particle has low KE, add more noise (heat up).
-        // This prevents explosions and keeps the system active.
         let energyDeficit = max(0.0, targetTemp - kineticEnergy);
-        
-        // Scale thermal force by the deficit
-        // Use a time-variant seed to ensure true Brownian motion
         let seed = myPos + vec2f(params.time * 100.0, f32(index) * 0.123);
         let thermalForce = rand2(seed) * sqrt(energyDeficit) * 0.5;
         
         force += thermalForce;
 
         // Force Limiter (Safety)
+        // Clamped to 20.0 (was 50.0) to prevent velocity spikes/tunneling
         let fLen = length(force);
-        let maxForce = 50.0; 
+        let maxForce = 20.0; 
         if (fLen > maxForce) {
             force = (force / fLen) * maxForce;
         }
 
-        // Symplectic Euler Integration
+        // Integration
         p.vel += force * params.dt;
-        p.vel *= dynamicViscosity; // Apply dynamic drag
+        p.vel *= dynamicViscosity; 
         p.pos += p.vel * params.dt;
         
         // Boundary Wrapping
@@ -296,7 +280,7 @@ struct Params {
     minDist: f32,
     count: f32,
     size: f32,
-    opacity: f32, // corresponds to baseColorOpacity
+    opacity: f32, 
     numTypes: f32,
     time: f32,
     growth: f32,
@@ -321,15 +305,14 @@ fn vs_main(
 ) -> VertexOutput {
     let p = particles[iIdx];
     
-    // Safety check for width/height
     let w = max(1.0, params.width);
     let h = max(1.0, params.height);
     let aspect = w / h;
 
-    // Expand particle size slightly for glow
-    let sizeNDC = (params.size * 1.5 / w) * 2.0;
+    // Increased size multiplier (1.5 -> 3.0) to allow for soft glow within the quad
+    let visualSize = params.size * 3.0; 
+    let sizeNDC = (visualSize / w) * 2.0;
     
-    // Standard Quad
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
         vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
@@ -346,7 +329,6 @@ fn vs_main(
     output.position = vec4f(pos, 0.0, 1.0);
     output.uv = offsets[vIdx];
 
-    // Safely clamp color index to prevent out-of-bounds crash
     let maxType = i32(params.numTypes) - 1;
     let cType = clamp(i32(round(p.color)), 0, maxType);
     
@@ -358,47 +340,45 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-    // Distance squared from center in UV space (-1 to 1)
     let d2 = dot(input.uv, input.uv); 
     
-    // Discard outside circle to avoid drawing transparent pixels in depth-less pipeline
+    // Discard outside circle
     if (d2 > 1.0) {
         discard;
     }
     
     let dist = sqrt(d2);
 
-    // --- High Quality Glow & Core ---
-    // Core: Sharper gaussian for the "body" of the particle
-    let core = exp(-6.0 * d2);
+    // --- Enhanced Glow & AA ---
     
-    // Halo: Wider, softer gaussian for the glow
-    let halo = exp(-2.0 * d2) * 0.3;
+    // 1. Core: Solid body of the particle
+    // exp(-9.0 * d2) gives a sharp center given the 3x quad size
+    let core = exp(-9.0 * d2);
     
-    // Combine for rich intensity
-    let rawIntensity = core + halo;
+    // 2. Glow: Soft, wide halo
+    // Lower coefficient (-3.0) means wider spread
+    let glow = exp(-3.0 * d2) * 0.5;
+    
+    // Combine
+    let intensity = core + glow;
 
-    // --- Anti-aliased Edge ---
-    // Smoothly fade out the very edge of the quad circle (last 10% radius)
-    let edgeAlpha = 1.0 - smoothstep(0.9, 1.0, dist);
+    // Soft edge fade at the boundary of the quad/circle for AA
+    let edgeFade = 1.0 - smoothstep(0.85, 1.0, dist);
     
-    // Apply Global Opacity Setting
-    let finalAlpha = rawIntensity * edgeAlpha * params.opacity;
+    // Final Alpha
+    let finalAlpha = intensity * edgeFade * params.opacity;
 
-    // --- Optimization: Early Discard ---
-    // If pixel is invisible, don't write to framebuffer (saves blend ops)
-    if (finalAlpha < 0.005) {
+    // Early exit for invisible pixels
+    if (finalAlpha < 0.01) {
         discard;
     }
 
     // --- Color Dynamics ---
-    // Boost the center towards white to simulate brightness/hotness
-    let whiteCore = smoothstep(0.8, 1.0, core);
-    let finalRgb = mix(input.color.rgb, vec3f(1.0), whiteCore * 0.5);
+    // White hot center for "energy" feel
+    let hotness = smoothstep(0.3, 0.0, dist);
+    let finalColor = mix(input.color.rgb, vec3f(1.0), hotness * 0.6);
 
-    // --- Output Premultiplied Alpha ---
-    // WebGPU blending states (add, one-minus-src-alpha) generally expect premultiplied output
-    return vec4f(finalRgb * finalAlpha, finalAlpha);
+    return vec4f(finalColor * finalAlpha, finalAlpha);
 }
 `;
 

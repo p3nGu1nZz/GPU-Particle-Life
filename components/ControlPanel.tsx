@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout, MousePointer2, Thermometer } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout, MousePointer2, Thermometer, ChevronDown, ChevronUp, Sliders, Zap, Grid, Eye } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -21,6 +21,30 @@ interface ControlPanelProps {
     setMutationRate: (r: number) => void;
 }
 
+const CollapsibleSection: React.FC<{ 
+    title: string; 
+    icon: React.ReactNode; 
+    children: React.ReactNode; 
+    defaultOpen?: boolean 
+}> = ({ title, icon, children, defaultOpen = false }) => {
+    const [isOpen, setIsOpen] = useState(defaultOpen);
+    return (
+        <div className="border border-white/10 rounded-lg bg-white/5 overflow-hidden mb-2">
+            <button
+                onClick={() => setIsOpen(!isOpen)}
+                className="w-full flex items-center justify-between p-3 bg-white/5 hover:bg-white/10 transition-colors"
+            >
+                <div className="flex items-center space-x-2 text-xs font-bold uppercase tracking-wider text-neutral-300">
+                    {icon}
+                    <span>{title}</span>
+                </div>
+                {isOpen ? <ChevronUp className="w-4 h-4 text-neutral-500" /> : <ChevronDown className="w-4 h-4 text-neutral-500" />}
+            </button>
+            {isOpen && <div className="p-3 border-t border-white/10 space-y-3">{children}</div>}
+        </div>
+    );
+};
+
 const ControlPanel: React.FC<ControlPanelProps> = ({ 
     params, setParams, rules, setRules, colors, setColors,
     isPaused, setIsPaused, onReset, onRandomize, fps, toggleFullscreen,
@@ -36,7 +60,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
         hideTimerRef.current = setTimeout(() => {
             setIsGearVisible(false);
-        }, 2000); // 2 seconds delay
+        }, 2000); 
     };
 
     const handleMouseEnter = () => {
@@ -60,21 +84,14 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         }
     }, [isMinimized]);
     
-    // Helper to toggle rules (Legacy, mostly unused now as matrix is auto-evolving)
-    const updateRule = (sourceIdx: number, targetIdx: number, value: number) => {
-        const newRules = rules.map(row => [...row]);
-        newRules[sourceIdx][targetIdx] = value;
-        setRules(newRules);
-    };
-
-    const updateParam = (key: keyof SimulationParams, value: any) => {
+    const updateParam = useCallback((key: keyof SimulationParams, value: any) => {
         setParams({ ...params, [key]: value });
-    };
+    }, [params, setParams]);
 
-    const setMatrixUniformly = (val: number) => {
+    const setMatrixUniformly = useCallback((val: number) => {
         const newRules = rules.map(row => row.map(() => val));
         setRules(newRules);
-    };
+    }, [rules, setRules]);
 
     const handleColorChange = (index: number, newHex: string) => {
         const r = parseInt(newHex.slice(1, 3), 16);
@@ -88,17 +105,11 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
 
     const addColor = () => {
         if (colors.length >= 32) return; 
-        
         const hue = Math.floor(Math.random() * 360);
-        const newHex = `hsl(${hue}, 100%, 50%)`;
-        
-        // Random RGB for init
         const r = Math.floor(Math.random() * 255);
         const g = Math.floor(Math.random() * 255);
         const b = Math.floor(Math.random() * 255);
-        
         const hex = "#" + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
-        
         const newColors = [...colors, { r, g, b, name: hex }];
         setColors(newColors);
     };
@@ -122,7 +133,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
 
     return (
         <>
-            {/* Toggle Button Container (Hover Zone) */}
+            {/* Toggle Button Container */}
             <div 
                 className={`fixed top-0 left-0 w-24 h-24 z-30 flex items-start justify-start pl-4 pt-4 transition-all duration-300 ${isMinimized ? 'pointer-events-auto' : 'pointer-events-none'}`}
                 onMouseEnter={handleMouseEnter}
@@ -146,7 +157,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
             <div 
                 className={`fixed top-0 left-0 h-full w-80 z-20 bg-neutral-900/95 backdrop-blur-xl border-r border-white/10 shadow-2xl transform transition-transform duration-300 ease-in-out flex flex-col ${isMinimized ? '-translate-x-full' : 'translate-x-0'}`}
             >
-                {/* Header with Stats and Close */}
+                {/* Header */}
                 <div className="p-4 border-b border-white/10 flex-shrink-0">
                     <div className="flex justify-between items-start mb-4">
                          <div className="flex items-center space-x-2">
@@ -194,13 +205,10 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                         </button>
                     </div>
 
-                    {/* Global Settings */}
-                    <div className="space-y-6 mb-8">
-                        {/* GPU & Display Settings */}
-                        <div className="space-y-4 p-3 bg-white/5 rounded-lg border border-white/5">
+                    <CollapsibleSection title="Display & Render" icon={<Monitor className="w-4 h-4 text-emerald-400"/>} defaultOpen={false}>
+                        <div className="space-y-4">
                             <div className="flex justify-between items-center text-xs">
                                 <span className="text-neutral-300 font-medium">Render Device</span>
-                                <Monitor className="w-3 h-3 text-neutral-500" />
                             </div>
                             <select 
                                 value={params.gpuPreference}
@@ -208,8 +216,8 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                 className="w-full bg-neutral-900 text-xs text-white border border-white/10 rounded px-2 py-1.5 outline-none focus:border-emerald-500"
                             >
                                 <option value="default">Default</option>
-                                <option value="high-performance">High Performance (Discrete)</option>
-                                <option value="low-power">Low Power (Integrated)</option>
+                                <option value="high-performance">High Performance</option>
+                                <option value="low-power">Low Power</option>
                             </select>
 
                             <InputSlider 
@@ -227,142 +235,111 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                 <Maximize className="w-3 h-3" />
                                 <span>Toggle Fullscreen</span>
                             </button>
-                        </div>
+                            
+                            <div className="h-px bg-white/5 my-2" />
 
-                         <div className="h-px bg-white/5 my-2" />
-
-                        {/* Trails & Rendering */}
-                        <div className="space-y-3">
                             <div className="flex justify-between items-center">
-                                <div className="flex flex-col">
-                                    <span className="text-neutral-300 font-medium text-xs">Trails</span>
-                                    <span className="text-neutral-500 text-[10px]">Disable screen clearing</span>
-                                </div>
+                                <span className="text-neutral-300 font-medium text-xs">Trails</span>
                                 <button
                                     onClick={() => updateParam('trails', !params.trails)}
                                     className={`relative w-12 h-6 rounded-full transition-colors duration-200 ease-in-out border border-white/10 ${params.trails ? 'bg-emerald-600' : 'bg-neutral-800'}`}
                                 >
-                                    <span 
-                                        className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-md transform transition-transform duration-200 ${params.trails ? 'translate-x-6' : 'translate-x-0'}`} 
-                                    />
+                                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-md transform transition-transform duration-200 ${params.trails ? 'translate-x-6' : 'translate-x-0'}`} />
                                 </button>
                             </div>
 
-                            {/* Blend Mode */}
-                             <div className="flex justify-between items-center bg-white/5 p-2 rounded">
-                                <div className="flex items-center space-x-2">
-                                    <Blend className="w-4 h-4 text-neutral-400" />
-                                    <span className="text-xs text-neutral-300">Blend Mode</span>
-                                </div>
+                             <div className="flex justify-between items-center">
+                                <span className="text-neutral-300 font-medium text-xs">Blend Mode</span>
                                 <div className="flex bg-black/50 rounded p-0.5">
                                     <button 
                                         onClick={() => updateParam('blendMode', 'additive')}
                                         className={`px-3 py-1 text-[10px] rounded transition-colors ${params.blendMode === 'additive' ? 'bg-emerald-600 text-white shadow-sm' : 'text-neutral-400 hover:text-white'}`}
                                     >
-                                        Additive
+                                        Add
                                     </button>
                                     <button 
                                         onClick={() => updateParam('blendMode', 'normal')}
                                         className={`px-3 py-1 text-[10px] rounded transition-colors ${params.blendMode === 'normal' ? 'bg-emerald-600 text-white shadow-sm' : 'text-neutral-400 hover:text-white'}`}
                                     >
-                                        Normal
+                                        Norm
                                     </button>
                                 </div>
                             </div>
+                        </div>
+                    </CollapsibleSection>
+
+                    <CollapsibleSection title="Particles & Colors" icon={<Palette className="w-4 h-4 text-emerald-400"/>}>
+                        <div className="space-y-4">
+                            <InputSlider 
+                                label="Count"
+                                value={params.particleCount}
+                                min={100} max={100000} step={100}
+                                onChange={(v) => updateParam('particleCount', v)}
+                                integer
+                            />
+                             <InputSlider 
+                                label="Size (px)"
+                                value={params.particleSize}
+                                min={0.5} max={10} step={0.5}
+                                onChange={(v) => updateParam('particleSize', v)}
+                            />
+                            <InputSlider 
+                                label="Opacity"
+                                value={params.baseColorOpacity}
+                                min={0.01} max={1.0} step={0.01}
+                                onChange={(v) => updateParam('baseColorOpacity', v)}
+                                formatValue={(v) => `${Math.round(v * 100)}%`}
+                            />
+
+                             <div className="h-px bg-white/5 my-2" />
                             
-                            {/* Biological Growth Toggle */}
+                            {/* Palette */}
+                            <div className="space-y-3">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-xs font-medium text-neutral-300">Palette ({colors.length})</span>
+                                    <div className="flex space-x-1">
+                                        <button onClick={randomizeColors} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-white"><RefreshCw className="w-3 h-3" /></button>
+                                        <button onClick={removeColor} disabled={colors.length <= 2} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-red-400 disabled:opacity-30"><Minus className="w-3 h-3" /></button>
+                                        <button onClick={addColor} disabled={colors.length >= 32} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-emerald-400 disabled:opacity-30"><Plus className="w-3 h-3" /></button>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-8 gap-1.5">
+                                    {colors.map((c, i) => (
+                                        <div key={i} className="relative group w-full aspect-square">
+                                            <input 
+                                                type="color" 
+                                                value={c.name} 
+                                                onChange={(e) => handleColorChange(i, e.target.value)}
+                                                className="w-full h-full block bg-transparent cursor-pointer rounded-sm overflow-hidden opacity-0 absolute inset-0 z-10"
+                                            />
+                                            <div className="w-full h-full rounded-sm border border-white/20 shadow-sm" style={{ backgroundColor: c.name }} />
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </CollapsibleSection>
+
+                    <CollapsibleSection title="Physics & Growth" icon={<Zap className="w-4 h-4 text-emerald-400"/>} defaultOpen={true}>
+                         <div className="space-y-4">
                             <div className="flex justify-between items-center bg-white/5 p-2 rounded border border-emerald-500/20">
                                 <div className="flex items-center space-x-2">
                                     <Sprout className="w-4 h-4 text-emerald-400" />
                                     <div className="flex flex-col">
-                                        <span className="text-xs text-emerald-100">Biological Growth</span>
-                                        <span className="text-[9px] text-emerald-500/70">Particles infect neighbors</span>
+                                        <span className="text-xs text-emerald-100">Bio Growth</span>
+                                        <span className="text-[9px] text-emerald-500/70">Infection mechanic</span>
                                     </div>
                                 </div>
                                 <button
                                     onClick={() => updateParam('growth', !params.growth)}
                                     className={`relative w-10 h-5 rounded-full transition-colors duration-200 ease-in-out border border-white/10 ${params.growth ? 'bg-emerald-600' : 'bg-neutral-800'}`}
                                 >
-                                    <span 
-                                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-md transform transition-transform duration-200 ${params.growth ? 'translate-x-5' : 'translate-x-0'}`} 
-                                    />
+                                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-md transform transition-transform duration-200 ${params.growth ? 'translate-x-5' : 'translate-x-0'}`} />
                                 </button>
                             </div>
 
                             <InputSlider 
-                                label="Color Opacity"
-                                value={params.baseColorOpacity}
-                                min={0.01} max={1.0} step={0.01}
-                                onChange={(v) => updateParam('baseColorOpacity', v)}
-                                formatValue={(v) => `${Math.round(v * 100)}%`}
-                            />
-                        </div>
-
-                        <div className="h-px bg-white/5 my-2" />
-                        
-                        {/* Color Palette Manager */}
-                        <div className="space-y-3">
-                            <div className="flex justify-between items-center">
-                                <div className="flex items-center space-x-2 text-xs font-medium text-neutral-300">
-                                    <Palette className="w-3 h-3" />
-                                    <span>Palette ({colors.length})</span>
-                                </div>
-                                <div className="flex space-x-1">
-                                    <button onClick={randomizeColors} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-white" title="Randomize All Colors">
-                                        <RefreshCw className="w-3 h-3" />
-                                    </button>
-                                    <button onClick={removeColor} disabled={colors.length <= 2} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-red-400 disabled:opacity-30">
-                                        <Minus className="w-3 h-3" />
-                                    </button>
-                                    <button onClick={addColor} disabled={colors.length >= 32} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-emerald-400 disabled:opacity-30">
-                                        <Plus className="w-3 h-3" />
-                                    </button>
-                                </div>
-                            </div>
-                            
-                            <div className="grid grid-cols-8 gap-1.5">
-                                {colors.map((c, i) => (
-                                    <div key={i} className="relative group w-full aspect-square">
-                                        <input 
-                                            type="color" 
-                                            value={c.name} 
-                                            onChange={(e) => handleColorChange(i, e.target.value)}
-                                            className="w-full h-full block bg-transparent cursor-pointer rounded-sm overflow-hidden opacity-0 absolute inset-0 z-10"
-                                        />
-                                        <div 
-                                            className="w-full h-full rounded-sm border border-white/20 shadow-sm"
-                                            style={{ backgroundColor: c.name }} 
-                                            title={`Color ${i}`}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className="h-px bg-white/5 my-2" />
-
-                        <InputSlider 
-                            label="Particle Count"
-                            value={params.particleCount}
-                            min={100} max={100000} step={100}
-                            onChange={(v) => updateParam('particleCount', v)}
-                            integer
-                        />
-                         <InputSlider 
-                            label="Particle Size (px)"
-                            value={params.particleSize}
-                            min={1} max={10} step={0.5}
-                            onChange={(v) => updateParam('particleSize', v)}
-                        />
-                        <div className="h-px bg-white/5 my-2" />
-                        
-                        <div className="space-y-3">
-                             <div className="flex items-center space-x-2 text-neutral-400">
-                                <Thermometer className="w-4 h-4" />
-                                <span className="text-xs font-bold tracking-wider">PHYSICS</span>
-                             </div>
-                            <InputSlider 
-                                label="Temperature (Entropy)"
+                                label="Temperature"
                                 value={params.temperature}
                                 min={0.0} max={10.0} step={0.1}
                                 onChange={(v) => updateParam('temperature', v)}
@@ -386,14 +363,13 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                 onChange={(v) => updateParam('rMax', v)}
                             />
                         </div>
-                    </div>
+                    </CollapsibleSection>
 
-                    {/* Matrix Heatmap */}
-                    <div className="mb-4">
+                    <CollapsibleSection title="Matrix Evolution" icon={<Grid className="w-4 h-4 text-emerald-400"/>} defaultOpen={true}>
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-400 flex items-center space-x-2">
-                                <span>Matrix</span>
-                                {isMutating && <Activity className="w-3 h-3 text-emerald-500 animate-pulse" />}
+                                <span>Status:</span>
+                                {isMutating ? <span className="text-emerald-400 animate-pulse">Evolving</span> : <span className="text-neutral-500">Static</span>}
                             </h3>
                             <div className="flex space-x-2 items-center">
                                 <button 
@@ -401,17 +377,15 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                     className={`flex items-center space-x-1 px-2 py-1 rounded text-[9px] border transition-colors ${isMutating ? 'bg-emerald-900/50 border-emerald-500 text-emerald-400' : 'bg-neutral-800 border-white/10 text-neutral-400'}`}
                                 >
                                     <Dna className="w-3 h-3" />
-                                    <span>Evolve</span>
+                                    <span>{isMutating ? 'Stop' : 'Start'}</span>
                                 </button>
                                 <div className="h-4 w-px bg-white/10"></div>
-                                <div className="flex space-x-1">
-                                    <button 
-                                        onClick={() => setMatrixUniformly(0)}
-                                        className="w-16 h-5 text-[9px] bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded flex items-center justify-center border border-white/10"
-                                    >
-                                        Clear
-                                    </button>
-                                </div>
+                                <button 
+                                    onClick={() => setMatrixUniformly(0)}
+                                    className="px-2 py-1 text-[9px] bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-white/10"
+                                >
+                                    Clear
+                                </button>
                             </div>
                         </div>
                         
@@ -429,7 +403,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                             rules={rules}
                             colors={colors}
                         />
-                    </div>
+                    </CollapsibleSection>
                 </div>
 
                 {/* Footer */}
@@ -444,16 +418,17 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
 
 // --- Subcomponents ---
 
+// Memoized Heatmap to prevent unnecessary redraws if parent renders but rules didn't change
 const MatrixHeatmap: React.FC<{
     rules: RuleMatrix,
     colors: ColorDefinition[]
-}> = ({ rules, colors }) => {
+}> = memo(({ rules, colors }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     
     // Config for internal resolution
     const headerSize = 10;
     const padding = 1;
-    const cellSize = 9; 
+    const cellSize = 8; // Slightly smaller to fit better
     const totalSize = headerSize + colors.length * cellSize;
 
     const draw = useCallback(() => {
@@ -463,15 +438,13 @@ const MatrixHeatmap: React.FC<{
         if (!ctx) return;
 
         // Clear
-        ctx.fillStyle = '#171717'; // neutral-900
+        ctx.fillStyle = '#171717'; 
         ctx.fillRect(0, 0, totalSize, totalSize);
 
-        // Draw Headers (Top and Left)
+        // Draw Headers
         colors.forEach((c, i) => {
             ctx.fillStyle = c.name;
-            // Top Header (Column colors)
             ctx.fillRect(headerSize + i * cellSize + padding, 0, cellSize - padding*2, headerSize - padding);
-            // Left Header (Row colors)
             ctx.fillRect(0, headerSize + i * cellSize + padding, headerSize - padding, cellSize - padding*2);
         });
 
@@ -481,7 +454,6 @@ const MatrixHeatmap: React.FC<{
                 const x = headerSize + c * cellSize;
                 const y = headerSize + r * cellSize;
                 
-                // Color mapping: Red (-1) -> Black (0) -> Green (1)
                 if (val > 0) {
                     const intensity = Math.floor(val * 255);
                     ctx.fillStyle = `rgb(0, ${intensity}, 0)`;
@@ -489,7 +461,6 @@ const MatrixHeatmap: React.FC<{
                     const intensity = Math.floor(Math.abs(val) * 255);
                     ctx.fillStyle = `rgb(${intensity}, 0, 0)`;
                 }
-
                 ctx.fillRect(x + padding, y + padding, cellSize - padding*2, cellSize - padding*2);
             });
         });
@@ -501,18 +472,18 @@ const MatrixHeatmap: React.FC<{
     }, [draw]);
 
     return (
-        <div className="relative w-full max-w-full">
+        <div className="relative w-full max-w-full overflow-hidden rounded border border-white/10">
             <canvas 
                 ref={canvasRef}
                 width={totalSize}
                 height={totalSize}
-                className="rounded border border-white/10 mx-auto w-full h-auto block"
-                style={{ width: '100%', height: 'auto' }}
+                className="w-full h-auto block"
             />
         </div>
     );
-};
+});
 
+// Memoized Slider
 const InputSlider: React.FC<{
     label: string;
     value: number;
@@ -522,7 +493,7 @@ const InputSlider: React.FC<{
     onChange: (val: number) => void;
     integer?: boolean;
     formatValue?: (val: number) => string;
-}> = ({ label, value, min, max, step, onChange, integer, formatValue }) => {
+}> = memo(({ label, value, min, max, step, onChange, integer, formatValue }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [tempValue, setTempValue] = useState(value.toString());
     const inputRef = useRef<HTMLInputElement>(null);
@@ -578,6 +549,6 @@ const InputSlider: React.FC<{
             />
         </div>
     );
-};
+});
 
 export default ControlPanel;

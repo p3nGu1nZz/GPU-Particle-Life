@@ -71,17 +71,7 @@ const App: React.FC = () => {
 
   // Adaptive Time Stepping Logic
   useEffect(() => {
-      // Adjust dt based on performance to keep physics stable
-      // If FPS drops, we might want to increase dt slightly or decrease it to prevent tunneling
-      // Here, we maintain a baseline but ensure it doesn't get too wild
-      if (fps > 0) {
-          const targetDt = DEFAULT_PARAMS.dt;
-          // Simple safeguard: if FPS is very low, don't let dt explode or simulation explodes
-          // If FPS is high (60+), keep standard dt
-          
-          // Actually, let's keep dt constant for determinism, but maybe adjust only if heavily lagging
-          // For this specific request, we just monitor it.
-      }
+      // Just monitoring for now
   }, [fps]);
 
   // Update logic when Color count changes
@@ -140,11 +130,10 @@ const App: React.FC = () => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
 
-  // --- Adaptive Physics & Enhanced Matrix Evolution ---
+  // --- Improved Evolution Algorithm ---
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
-      // Slowed down to 200ms to reduce visual "wave" artifacts
       const evolutionInterval = setInterval(() => {
           
           let totalMagnitude = 0;
@@ -152,95 +141,96 @@ const App: React.FC = () => {
           
           setRules(prevRules => {
               const size = prevRules.length;
-              const nextRules = prevRules.map(row => [...row]);
+              const nextRules = new Array(size);
               
               for(let i = 0; i < size; i++) {
+                  nextRules[i] = new Array(size);
                   for(let j = 0; j < size; j++) {
                       
                       let neighborSum = 0;
-                      let count = 0;
                       
-                      // Convolution (3x3)
-                      for(let di = -1; di <= 1; di++) {
-                          for(let dj = -1; dj <= 1; dj++) {
-                              if (di === 0 && dj === 0) continue;
-                              
-                              const ni = (i + di + size) % size;
-                              const nj = (j + dj + size) % size;
-                              
-                              const weight = (Math.abs(di) + Math.abs(dj) === 1) ? 1.0 : 0.7;
-                              neighborSum += prevRules[ni][nj] * weight;
-                              count += weight;
-                          }
-                      }
+                      // 3x3 Convolution - Optimized loop
+                      // Weights: Center 0, Orthogonal 1, Diagonal 0.7
+                      // Using explicit indices for performance vs loop overhead
+                      const up = (i - 1 + size) % size;
+                      const down = (i + 1) % size;
+                      const left = (j - 1 + size) % size;
+                      const right = (j + 1) % size;
+
+                      neighborSum += prevRules[up][j];
+                      neighborSum += prevRules[down][j];
+                      neighborSum += prevRules[i][left];
+                      neighborSum += prevRules[i][right];
                       
-                      const neighborAvg = neighborSum / count;
+                      neighborSum += (prevRules[up][left] + prevRules[up][right] + prevRules[down][left] + prevRules[down][right]) * 0.7;
+
+                      const neighborAvg = neighborSum / 6.8; // 4 + 4*0.7 = 6.8
                       const current = prevRules[i][j];
                       
-                      // Reaction-Diffusion logic
-                      const diffusion = (neighborAvg - current) * 0.1;
-                      const reaction = (current - current * current * current) * 0.05;
+                      // Reaction-Diffusion
+                      const diffusion = (neighborAvg - current) * 0.15;
+                      // Cubic reaction term stabilizes around -1, 0, 1
+                      const reaction = (current - Math.pow(current, 3)) * 0.1;
                       
                       let mutation = 0;
                       
-                      // Spontaneous Generation Logic
-                      // If the area is effectively "dead" (near zero), boost mutation significantly
-                      // to allow life to restart from a cleared matrix.
+                      // Spontaneous Generation in dead zones
+                      const energy = Math.abs(current);
+                      const localEnergy = Math.abs(neighborAvg);
+                      
                       let effectiveMutationChance = mutationRate * 0.05;
                       
-                      if (Math.abs(current) < 0.05 && Math.abs(neighborAvg) < 0.05) {
-                          // Boost chance in the void
-                          effectiveMutationChance = Math.max(0.02, mutationRate * 0.5); 
+                      if (energy < 0.01 && localEnergy < 0.01) {
+                          // Boost restart chance in empty space
+                          effectiveMutationChance = Math.max(0.01, mutationRate * 0.2); 
                       }
 
                       if (Math.random() < effectiveMutationChance) {
-                          // Stronger mutation kick
-                          mutation = (Math.random() - 0.5) * 0.8;
+                          mutation = (Math.random() * 2 - 1) * 0.5;
                       }
 
                       let target = current + diffusion + reaction + mutation;
 
-                      // Decay (Entropy) - prevents runaway saturation, but kept low to allow growth
-                      target -= current * 0.005; 
+                      // Entropy / Decay to zero to prevent noise buildup
+                      target *= 0.995;
 
-                      // Negative feedback from high local energy
-                      if (Math.abs(neighborAvg) > 0.4) {
-                           target -= neighborAvg * 0.1; 
-                      }
-
-                      const lerpSpeed = 0.1; 
-                      nextRules[i][j] = current + (target - current) * lerpSpeed;
-                      nextRules[i][j] = Math.max(-1, Math.min(1, nextRules[i][j]));
+                      // Clamp smoothly
+                      if (target > 1.0) target = 1.0;
+                      if (target < -1.0) target = -1.0;
                       
-                      totalMagnitude += Math.abs(nextRules[i][j]);
+                      // Snap to zero if very small (Performance & Stability)
+                      if (Math.abs(target) < 0.005) target = 0;
+
+                      nextRules[i][j] = target;
+                      
+                      totalMagnitude += Math.abs(target);
                       totalCells++;
                   }
               }
               return nextRules;
           });
           
+          // Auto-balance global force based on matrix saturation
           if (totalCells > 0) {
               const avgMagnitude = totalMagnitude / totalCells;
               
-              // Only adjust force if it's drifting significantly
               const baseForce = DEFAULT_PARAMS.forceFactor;
               let targetForce = baseForce;
 
-              // If matrix is very hot (strong forces), lower the global multiplier
-              // If matrix is cold (weak forces), boost it
-              if (avgMagnitude > 0.3) targetForce = baseForce * 0.8;
-              if (avgMagnitude < 0.1) targetForce = baseForce * 1.5;
+              // If matrix is saturated (chaotic), reduce force
+              if (avgMagnitude > 0.4) targetForce = baseForce * 0.7;
+              // If matrix is sparse (boring), increase force
+              if (avgMagnitude < 0.05) targetForce = baseForce * 1.8;
 
-              // Gentle lerp
-              if (Math.abs(targetForce - params.forceFactor) > 0.01) {
+              if (Math.abs(targetForce - params.forceFactor) > 0.05) {
                   setParams(p => ({
                       ...p,
-                      forceFactor: p.forceFactor + (targetForce - p.forceFactor) * 0.05
+                      forceFactor: p.forceFactor + (targetForce - p.forceFactor) * 0.1
                   }));
               }
           }
 
-      }, 200); // 200ms interval for stability
+      }, 200);
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate, params.forceFactor]);
@@ -248,7 +238,7 @@ const App: React.FC = () => {
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;
     const newRules = Array(num).fill(0).map((_, y) => 
-         Array(num).fill(0).map((_, x) => Math.sin(x * 0.1) * Math.cos(y * 0.1) + (Math.random() - 0.5))
+         Array(num).fill(0).map((_, x) => Math.sin(x * 0.2) * Math.cos(y * 0.2) * 0.8 + (Math.random() - 0.5) * 0.2)
     );
     setRules(newRules);
   }, [colors.length]);
