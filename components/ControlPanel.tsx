@@ -136,7 +136,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     };
 
     const addColor = () => {
-        if (colors.length >= 32) return; 
+        if (colors.length >= 64) return; 
         const hue = Math.floor(Math.random() * 360);
         const r = Math.floor(Math.random() * 255);
         const g = Math.floor(Math.random() * 255);
@@ -391,7 +391,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                     <div className="flex space-x-1">
                                         <button onClick={randomizeColors} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-white"><RefreshCw className="w-3 h-3" /></button>
                                         <button onClick={removeColor} disabled={colors.length <= 2} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-red-400 disabled:opacity-30"><Minus className="w-3 h-3" /></button>
-                                        <button onClick={addColor} disabled={colors.length >= 32} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-emerald-400 disabled:opacity-30"><Plus className="w-3 h-3" /></button>
+                                        <button onClick={addColor} disabled={colors.length >= 64} className="p-1 hover:bg-white/10 rounded text-neutral-400 hover:text-emerald-400 disabled:opacity-30"><Plus className="w-3 h-3" /></button>
                                     </div>
                                 </div>
                                 <div className="grid grid-cols-8 gap-1.5">

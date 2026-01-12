@@ -70,7 +70,7 @@ struct Params {
 @group(0) @binding(2) var<uniform> params: Params;
 
 const BLOCK_SIZE = 256u;
-const MAX_TYPES = 32u; 
+const MAX_TYPES = 64u; 
 
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
@@ -122,7 +122,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var localDensity = 0.0; 
 
     // --- Optimization: Rule Caching ---
-    var myRules: array<f32, 32>;
+    var myRules: array<f32, 64>;
     let numTypes = u32(params.numTypes);
     
     // Load rules into registers
@@ -438,8 +438,8 @@ export class SimulationEngine {
     private mouseInteractionType: number = 0; 
     
     // Rules Texture Config
-    // Optimization: Reduced to 32 to match shader
-    private readonly MAX_RULE_TEXTURE_SIZE = 32;
+    // Optimization: Reduced to 64 to match shader
+    private readonly MAX_RULE_TEXTURE_SIZE = 64;
 
     constructor(canvas: HTMLCanvasElement, onFpsUpdate?: (fps: number) => void) {
         this.canvas = canvas;
