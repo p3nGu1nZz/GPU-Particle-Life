@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference, SavedConfiguration } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid, Download, Upload } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid, Download, Upload, Minimize2, Maximize2 } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -52,7 +52,10 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     isMutating, setIsMutating, mutationRate, setMutationRate
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
+    const [isFloatingMinimized, setIsFloatingMinimized] = useState(false);
+    const [isFloatingIdle, setIsFloatingIdle] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const floatTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     
     // Gear Icon Visibility Logic
     const [isGearVisible, setIsGearVisible] = useState(false);
@@ -85,6 +88,33 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
         }
     }, [isMinimized]);
+
+    // Floating Panel Auto-Hide Logic
+    const startFloatTimer = useCallback(() => {
+        if (floatTimer.current) clearTimeout(floatTimer.current);
+        // Only auto-hide if it is minimized (icon mode) and the main panel is hidden
+        if (isMinimized && isFloatingMinimized) {
+             floatTimer.current = setTimeout(() => {
+                 setIsFloatingIdle(true);
+             }, 3000); // 3 seconds
+        }
+    }, [isMinimized, isFloatingMinimized]);
+
+    const handleFloatingMouseEnter = () => {
+        if (floatTimer.current) clearTimeout(floatTimer.current);
+        setIsFloatingIdle(false);
+    };
+
+    const handleFloatingMouseLeave = () => {
+        startFloatTimer();
+    };
+
+    useEffect(() => {
+        // Reset idle state when configuration changes
+        setIsFloatingIdle(false);
+        startFloatTimer();
+        return () => { if (floatTimer.current) clearTimeout(floatTimer.current); };
+    }, [startFloatTimer]);
     
     const updateParam = useCallback((key: keyof SimulationParams, value: any) => {
         setParams({ ...params, [key]: value });
@@ -161,6 +191,10 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         // Reset value to allow re-selecting same file
         e.target.value = '';
     };
+
+    // determine visibility classes for floating panel
+    const showFloating = isMinimized;
+    const isFloatingHidden = isFloatingMinimized && isFloatingIdle;
 
     return (
         <>
@@ -467,6 +501,35 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                 <div className="p-4 border-t border-white/10 flex-shrink-0 flex items-center justify-center space-x-2 text-neutral-500">
                     <MousePointer2 className="w-3 h-3" />
                     <span className="text-[10px]">L-Click to Repel • R-Click to Attract</span>
+                </div>
+            </div>
+
+            {/* Floating Heatmap Overlay */}
+            <div 
+                className={`fixed bottom-4 left-4 z-20 transition-all duration-500 ease-out transform ${
+                    showFloating 
+                        ? (isFloatingHidden ? 'opacity-0 translate-y-0 scale-100' : 'opacity-100 translate-y-0 scale-100')
+                        : 'opacity-0 translate-y-8 scale-95 pointer-events-none'
+                }`}
+                onMouseEnter={handleFloatingMouseEnter}
+                onMouseLeave={handleFloatingMouseLeave}
+            >
+                <div className="bg-black/60 backdrop-blur-xl border border-white/10 rounded-lg p-3 shadow-2xl hover:bg-black/80 transition-colors">
+                    <div className="flex items-center justify-between mb-2 opacity-70">
+                        <div className="flex items-center space-x-2">
+                            <Grid className="w-3 h-3 text-emerald-400" />
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-white">Matrix</span>
+                        </div>
+                        <button onClick={() => setIsFloatingMinimized(!isFloatingMinimized)} className="hover:text-white text-neutral-400" title={isFloatingMinimized ? "Expand" : "Minimize"}>
+                            {isFloatingMinimized ? <Maximize2 size={12} /> : <Minimize2 size={12} />}
+                        </button>
+                    </div>
+                    
+                    {!isFloatingMinimized && (
+                        <div className="w-48 max-w-48">
+                            <MatrixHeatmap rules={rules} colors={colors} />
+                        </div>
+                    )}
                 </div>
             </div>
         </>

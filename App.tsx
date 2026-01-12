@@ -16,8 +16,8 @@ const App: React.FC = () => {
   const [colors, setColors] = useState<ColorDefinition[]>(DEFAULT_COLORS);
   
   const [isPaused, setIsPaused] = useState(false);
-  const [isMutating, setIsMutating] = useState(false); 
-  const [mutationRate, setMutationRate] = useState(0.1); 
+  const [isMutating, setIsMutating] = useState(true); 
+  const [mutationRate, setMutationRate] = useState(0.02); 
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
   // Initialize WebGPU Engine
