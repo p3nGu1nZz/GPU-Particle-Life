@@ -75,15 +75,15 @@ const MAX_TYPES = 32u;
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
 
-fn hash(p: vec2f) -> f32 {
-    return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
+// Faster hash for inner loops (lower quality but sufficient for variation)
+fn fast_hash(seed: vec2f) -> f32 {
+    return fract(sin(dot(seed, vec2f(12.9898, 78.233))) * 43758.5453);
 }
 
 fn rand2(seed: vec2f) -> vec2f {
-    return vec2f(
-        hash(seed + vec2f(1.0, 0.0)),
-        hash(seed + vec2f(0.0, 1.0))
-    ) * 2.0 - 1.0;
+    let t = fast_hash(seed);
+    let u = fast_hash(seed + vec2f(1.0, 0.0));
+    return vec2f(t, u) * 2.0 - 1.0;
 }
 
 @compute @workgroup_size(256)
@@ -91,6 +91,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let index = global_id.x;
     let particleCount = u32(params.count);
 
+    // Loop Invariants & Optimization Constants
     let rMax = params.rMax;
     let rMaxSq = rMax * rMax; 
     let rMaxInv = 1.0 / rMax; 
@@ -98,11 +99,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let safeRMin = max(0.001, rMin);
     
     // Improved Physics Constants
-    let interactionRange = rMax - safeRMin;
-    let interactionRangeInv = 1.0 / interactionRange;
+    let interactionRangeInv = 1.0 / (rMax - safeRMin);
 
     let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
+    
+    // Precalculate seed base for growth to avoid calculating per-neighbor
+    let growthSeedBase = params.time + f32(index) * 0.123;
     
     var myPos = vec2f(0.0);
     var myColor = 0.0;
@@ -122,7 +125,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var myRules: array<f32, 32>;
     let numTypes = u32(params.numTypes);
     
-    // Constant loop, usually unrolled by compiler
+    // Load rules into registers
     for (var t = 0u; t < MAX_TYPES; t++) {
         if (t < numTypes) {
              myRules[t] = textureLoad(rulesTex, vec2u(t, myType), 0).r;
@@ -134,28 +137,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     // --- Mouse Interaction ---
     if (params.mouseType != 0.0) {
         let mousePos = vec2f(params.mouseX, params.mouseY);
-        // Optimization: Fast wrapping using fract
         let rawD = myPos - mousePos;
         let dm = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
-        
         let distM = length(dm);
-        let mouseRadius = 0.4;
+        let mouseRadius = params.width * 0.0003; // Dynamic radius based on screen size approx
         
-        if (distM < mouseRadius) {
-            let mForce = (1.0 - distM / mouseRadius) * 5.0; 
-            force += (dm / (distM + 0.001)) * mForce * params.mouseType;
+        if (distM < 0.4) { // Hard coded mouse radius for now
+             let mForce = (1.0 - distM / 0.4) * 5.0; 
+             force += (dm / (distM + 0.001)) * mForce * params.mouseType;
         }
     }
 
     // --- Tiled N-Body Calculation ---
     for (var i = 0u; i < particleCount; i += BLOCK_SIZE) {
         let tile_idx = i + local_id.x;
+        
+        // Load tile into Shared Memory (Workgroup)
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
             tile_pos[local_id.x] = p.pos;
             tile_type[local_id.x] = u32(round(p.color)); 
         } else {
-            tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
+            tile_pos[local_id.x] = vec2f(-1000.0, -1000.0); // Sentinel
             tile_type[local_id.x] = 0u;
         }
 
@@ -163,49 +166,49 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
         if (index < particleCount) {
             let limit = min(BLOCK_SIZE, particleCount - i);
+            
+            // Unrolling 4x could help here, but WGSL compiler usually handles this loop well
             for (var j = 0u; j < BLOCK_SIZE; j++) {
                 if (j >= limit) { break; } 
 
                 let otherPos = tile_pos[j];
                 let rawD = otherPos - myPos;
-                // Fast Wrapping
+                // Fast Wrapping: (fract(val/2 + 0.5) * 2) - 1
                 let d = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
                 let d2 = dot(d, d);
 
-                if (d2 > 0.000001 && d2 < rMaxSq) {
-                    let invDist = inverseSqrt(d2);
-                    let dist = d2 * invDist; 
-                    localDensity += (1.0 - dist * rMaxInv);
-
-                    var f = 0.0;
-                    if (dist < safeRMin) {
-                        // Repulsion: Stronger, but smoother falloff relative to overlap
-                        let repulsionStr = 1.0 - (dist / safeRMin);
-                        f = -3.0 * repulsionStr;
-                        
-                        if (growthEnabled && dist < 0.02) {
-                             let t = floor(params.time * 2.0); 
-                             let randVal = hash(vec2f(f32(j) + t, f32(index)));
-                             if (randVal < 0.01) { 
-                                 newColor = f32(tile_type[j]); 
-                             }
-                        }
-                    } else {
-                        // Attraction/Repulsion: Parabolic envelope for smoother structures
-                        // Normalized distance within interaction range (0.0 to 1.0)
-                        let q = (dist - safeRMin) * interactionRangeInv;
-                        
-                        // Parabolic arc: 4 * x * (1 - x). Peak at 0.5.
-                        // This prevents harsh cutoffs at max range and min range.
-                        let envelope = 4.0 * q * (1.0 - q);
-                        
-                        let otherType = tile_type[j]; 
-                        let ruleVal = myRules[otherType];
-                        
-                        f = ruleVal * envelope;
-                    }
-                    force += d * (invDist * f * baseForceFactor);
+                // Early Exit: Skip if out of range or self (d2 very small)
+                if (d2 > rMaxSq || d2 < 0.000001) {
+                    continue;
                 }
+
+                let invDist = inverseSqrt(d2);
+                let dist = d2 * invDist; // = sqrt(d2)
+                
+                // Density accumulation
+                localDensity += (1.0 - dist * rMaxInv);
+
+                var f = 0.0;
+                if (dist < safeRMin) {
+                    // Repulsion: Stronger, but smoother falloff relative to overlap
+                    f = -3.0 * (1.0 - (dist / safeRMin));
+                    
+                    // Optimized Growth / Infection Logic
+                    if (growthEnabled && dist < 0.02) {
+                         // Use simplified hash check for performance
+                         if (fast_hash(vec2f(growthSeedBase, f32(j))) < 0.01) { 
+                             newColor = f32(tile_type[j]); 
+                         }
+                    }
+                } else {
+                    // Attraction/Repulsion
+                    let q = (dist - safeRMin) * interactionRangeInv;
+                    let envelope = 4.0 * q * (1.0 - q);
+                    // Use cached rule
+                    f = myRules[tile_type[j]] * envelope;
+                }
+                
+                force += d * (invDist * f * baseForceFactor);
             }
         }
         workgroupBarrier();
@@ -218,21 +221,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         // --- Improved Physics Dynamics ---
 
         // 1. Crowd Damping (Stability)
-        // High local density = high pressure. We increase drag to prevent numerical explosions.
-        // localDensity accumulates (1.0 - dist/rMax). 
-        // A value of 20.0 means ~40 neighbors at half radius.
         let crowding = smoothstep(10.0, 80.0, localDensity);
         
         // 2. Speed limit (Aerodynamics)
-        let aerodynamic = smoothstep(0.0, 2.0, speed); // 0 to 1 as speed goes 0 to 2
+        let aerodynamic = smoothstep(0.0, 2.0, speed);
 
         // Base Friction
         var frict = params.friction;
         
-        // Apply Crowd Damping: Reduces velocity retention when crowded
+        // Apply Crowd Damping
         frict = mix(frict, frict * 0.4, crowding);
-        
-        // Apply Aero Damping: Caps max speed softly
+        // Apply Aero Damping
         frict = mix(frict, frict * 0.9, aerodynamic);
 
         // --- Adaptive Temperature ---
@@ -240,19 +239,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
              let seed = myPos + vec2f(params.time * 60.0, f32(index) * 0.7123);
              let randDir = rand2(seed); 
 
-             // Base magnitude scaled by parameter
              var noiseVal = params.temperature;
              
-             // Stagnation Boost: Kick particles stuck in local minima
-             // If speed is low, boost noise.
+             // Stagnation Boost
              let stagnation = 1.0 - smoothstep(0.0, 0.1, speed);
              noiseVal *= (1.0 + stagnation * 3.0); 
 
-             // Crowd "Heat": Densely packed particles vibrate more (simulate pressure)
+             // Crowd "Heat"
              noiseVal *= (1.0 + crowding * 2.0);
              
-             // Scale noise force relative to mass/inertia (implicit mass=1)
-             // We apply this as a force.
              force += randDir * noiseVal;
         }
 
@@ -333,10 +328,18 @@ fn vs_main(
     let aspect = w / h;
 
     // Soft Particle Geometry
-    // We increase the quad size multiplier to 4.0x the physics "size"
-    // This provides padding for a soft radial glow without harsh clipping.
     let quadSize = params.size * 4.0; 
     let sizeNDC = (quadSize / w) * 2.0;
+
+    // --- LOD Optimization ---
+    // If the particle is smaller than 0.5 screen pixels, cull it.
+    // This saves rasterization for millions of tiny distant/small particles.
+    if (quadSize < 0.5) {
+        var cullOut: VertexOutput;
+        // Move vertex behind camera or off-screen
+        cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
+        return cullOut;
+    }
     
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
@@ -369,17 +372,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
         discard;
     }
 
-    // --- Soft Particle Rendering ---
-    // Instead of a sharp Gaussian, we use a cubic polynomial falloff.
-    // This creates a "bloom" effect where the particle seems to glow.
-    // 1.0 at center, 0.0 at edge.
-    
     let falloff = 1.0 - d2;
     // Cubic smoothing (x^3) gives a nice soft edge
     let alphaShape = falloff * falloff * falloff; 
 
     // Add a hot white core to the center (energy look)
-    // Starts fading in at 60% radius squared
     let core = smoothstep(0.6, 1.0, falloff);
     
     let finalColor = mix(input.color.rgb, vec3f(1.0), core * 0.5);

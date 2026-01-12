@@ -608,4 +608,4 @@ const InputSlider: React.FC<{
     );
 });
 
-export default ControlPanel;
+export default memo(ControlPanel);
