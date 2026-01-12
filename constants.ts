@@ -34,27 +34,28 @@ const generateColors = (count: number): ColorDefinition[] => {
     return colors;
 };
 
-export const DEFAULT_COLORS: ColorDefinition[] = generateColors(64);
+// Optimization: Reduced to 32 types for better GPU register usage
+export const DEFAULT_COLORS: ColorDefinition[] = generateColors(32);
 
 export const DEFAULT_PARAMS: SimulationParams = {
-    particleCount: 16000,
+    particleCount: 15000, 
     friction: 0.82,     
     dt: 0.02,       
-    rMax: 0.1,          
+    rMax: 0.12,          
     forceFactor: 0.4,   
     minDistance: 0.01,  
     particleSize: 1.0,  
-    trails: false,
+    trails: true,
     dpiScale: 1.0,
     gpuPreference: 'high-performance',
-    blendMode: 'normal',
+    blendMode: 'normal', 
     baseColorOpacity: 0.8,
-    numTypes: 64, 
-    growth: true,      
-    temperature: 1.0,   
+    numTypes: 32, 
+    growth: false,      
+    temperature: 0.5,   
     mouseInteractionRadius: 0.3,
     mouseInteractionForce: 5.0, 
 };
 
 // Initialize with empty matrix (zeros) so simulation starts clean
-export const DEFAULT_RULES: RuleMatrix = Array(64).fill(0).map(() => Array(64).fill(0));
+export const DEFAULT_RULES: RuleMatrix = Array(32).fill(0).map(() => Array(32).fill(0));

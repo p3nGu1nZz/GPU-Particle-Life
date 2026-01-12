@@ -26,9 +26,6 @@ fn vs_main(@builtin(vertex_index) vIdx: u32) -> @builtin(position) vec4f {
 @fragment
 fn fs_main() -> @location(0) vec4f {
     // Black with alpha 0.15 gives ~85% retention per frame (trails)
-    // Standard blending (SrcAlpha, OneMinusSrcAlpha) will result in:
-    // Dest = Src * 0.15 + Dest * 0.85
-    // Since Src is black (0), Dest = Dest * 0.85
     return vec4f(0.0, 0.0, 0.0, 0.15); 
 }
 `;
@@ -73,19 +70,15 @@ struct Params {
 @group(0) @binding(2) var<uniform> params: Params;
 
 const BLOCK_SIZE = 256u;
-const MAX_TYPES = 64u; // Must match MAX_RULE_TEXTURE_SIZE in TS
+const MAX_TYPES = 32u; 
 
-// Shared memory for optimized N-Body
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
-// Optimization: Store types as u32 to avoid repeated casting/rounding in hot loop
 var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
 
-// Pseudo-random hash for noise
 fn hash(p: vec2f) -> f32 {
     return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
 }
 
-// 2D Random for thermal noise
 fn rand2(seed: vec2f) -> vec2f {
     return vec2f(
         hash(seed + vec2f(1.0, 0.0)),
@@ -104,9 +97,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let rMin = params.minDist;
     let safeRMin = max(0.001, rMin);
     
-    let mid = (rMax + safeRMin) * 0.5;
-    let rangeFactor = 2.0 / max(0.0001, rMax - safeRMin); 
-    let rMinInv = 1.0 / safeRMin;
+    // Improved Physics Constants
+    let interactionRange = rMax - safeRMin;
+    let interactionRangeInv = 1.0 / interactionRange;
+
     let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
     
@@ -125,9 +119,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var localDensity = 0.0; 
 
     // --- Optimization: Rule Caching ---
-    var myRules: array<f32, 64>;
+    var myRules: array<f32, 32>;
     let numTypes = u32(params.numTypes);
     
+    // Constant loop, usually unrolled by compiler
     for (var t = 0u; t < MAX_TYPES; t++) {
         if (t < numTypes) {
              myRules[t] = textureLoad(rulesTex, vec2u(t, myType), 0).r;
@@ -139,8 +134,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     // --- Mouse Interaction ---
     if (params.mouseType != 0.0) {
         let mousePos = vec2f(params.mouseX, params.mouseY);
-        var dm = myPos - mousePos;
-        dm = dm - 2.0 * round(dm / 2.0);
+        // Optimization: Fast wrapping using fract
+        let rawD = myPos - mousePos;
+        let dm = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
+        
         let distM = length(dm);
         let mouseRadius = 0.4;
         
@@ -170,8 +167,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 if (j >= limit) { break; } 
 
                 let otherPos = tile_pos[j];
-                var d = otherPos - myPos;
-                d = d - 2.0 * round(d / 2.0);
+                let rawD = otherPos - myPos;
+                // Fast Wrapping
+                let d = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
                 let d2 = dot(d, d);
 
                 if (d2 > 0.000001 && d2 < rMaxSq) {
@@ -181,9 +179,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
                     var f = 0.0;
                     if (dist < safeRMin) {
-                        let relDist = dist * rMinInv;
-                        // Softer repulsion core (was -4.0) to prevent jittery explosions
-                        f = -3.0 * (1.0 - relDist); 
+                        // Repulsion: Stronger, but smoother falloff relative to overlap
+                        let repulsionStr = 1.0 - (dist / safeRMin);
+                        f = -3.0 * repulsionStr;
+                        
                         if (growthEnabled && dist < 0.02) {
                              let t = floor(params.time * 2.0); 
                              let randVal = hash(vec2f(f32(j) + t, f32(index)));
@@ -192,11 +191,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                              }
                         }
                     } else {
+                        // Attraction/Repulsion: Parabolic envelope for smoother structures
+                        // Normalized distance within interaction range (0.0 to 1.0)
+                        let q = (dist - safeRMin) * interactionRangeInv;
+                        
+                        // Parabolic arc: 4 * x * (1 - x). Peak at 0.5.
+                        // This prevents harsh cutoffs at max range and min range.
+                        let envelope = 4.0 * q * (1.0 - q);
+                        
                         let otherType = tile_type[j]; 
                         let ruleVal = myRules[otherType];
-
-                        let strength = 1.0 - abs(dist - mid) * rangeFactor;
-                        f = ruleVal * strength;
+                        
+                        f = ruleVal * envelope;
                     }
                     force += d * (invDist * f * baseForceFactor);
                 }
@@ -205,48 +211,56 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         workgroupBarrier();
     }
 
-    // --- Adaptive Physics Implementation (Thermostat & Jamming) ---
     if (index < particleCount) {
         var p = particles[index]; 
-
-        // 1. Calculate Local Pressure
-        // Lower threshold (5.0 -> 30.0) ensures jamming logic activates in loose clusters too
-        let pressure = smoothstep(5.0, 30.0, localDensity);
-        
-        // 2. Dynamic Viscosity (Jamming)
-        // Stronger damping in dense regions (factor 0.2 instead of 0.6).
-        // This acts as a "glue" for colonies, significantly reducing jitter.
-        let dynamicViscosity = mix(params.friction, params.friction * 0.2, pressure);
-        
-        // 3. Statistical Mechanics Thermostat
         let speed = length(p.vel);
-        let kineticEnergy = 0.5 * speed * speed;
-        
-        // Reduced thermal heating in dense zones (factor 0.5 instead of 2.0).
-        // This allows solid structures to form without being "melted" by artificial heat.
-        let targetTemp = params.temperature * (1.0 + pressure * 0.5);
-        
-        let energyDeficit = max(0.0, targetTemp - kineticEnergy);
-        let seed = myPos + vec2f(params.time * 100.0, f32(index) * 0.123);
-        let thermalForce = rand2(seed) * sqrt(energyDeficit) * 0.5;
-        
-        force += thermalForce;
 
-        // Force Limiter (Safety)
-        // Clamped to 20.0 (was 50.0) to prevent velocity spikes/tunneling
+        // --- Adaptive Friction ---
+        // Calculate a "crowding" factor based on local density
+        // Increased threshold range so particles can clump tighter before stalling
+        let crowding = smoothstep(5.0, 30.0, localDensity);
+        
+        // Base friction (velocity retention)
+        var currentFriction = params.friction;
+        
+        // 1. Density-based damping: High density -> increased drag
+        currentFriction = mix(currentFriction, currentFriction * 0.5, crowding);
+        
+        // 2. Speed-based damping: Aerodynamic drag limit
+        let drag = smoothstep(0.0, 3.0, speed);
+        currentFriction = mix(currentFriction, currentFriction * 0.9, drag);
+
+        // --- Adaptive Temperature (Brownian Motion) ---
+        if (params.temperature > 0.001) {
+             let seed = myPos + vec2f(params.time * 60.0, f32(index) * 0.1337);
+             let randDir = rand2(seed); 
+
+             var noiseMag = params.temperature;
+             
+             // Stagnation boost: Help slow particles move
+             let stagnation = 1.0 - smoothstep(0.0, 0.2, speed);
+             noiseMag *= (1.0 + stagnation * 2.0);
+
+             // Density boost: Help crowded particles melt
+             noiseMag *= (1.0 + crowding * 1.5);
+             
+             force += randDir * noiseMag;
+        }
+
+        // Force Limiting
         let fLen = length(force);
-        let maxForce = 20.0; 
+        let maxForce = 10.0; 
         if (fLen > maxForce) {
             force = (force / fLen) * maxForce;
         }
 
-        // Integration
+        // Symplectic Euler Integration
         p.vel += force * params.dt;
-        p.vel *= dynamicViscosity; 
+        p.vel *= currentFriction; 
         p.pos += p.vel * params.dt;
         
         // Boundary Wrapping
-        p.pos = p.pos - 2.0 * round(p.pos / 2.0);
+        p.pos = fract(p.pos * 0.5 + 0.5) * 2.0 - 1.0;
         
         p.color = newColor; 
         particles[index] = p;
@@ -309,9 +323,11 @@ fn vs_main(
     let h = max(1.0, params.height);
     let aspect = w / h;
 
-    // Increased size multiplier (1.5 -> 3.0) to allow for soft glow within the quad
-    let visualSize = params.size * 3.0; 
-    let sizeNDC = (visualSize / w) * 2.0;
+    // Soft Particle Geometry
+    // We increase the quad size multiplier to 4.0x the physics "size"
+    // This provides padding for a soft radial glow without harsh clipping.
+    let quadSize = params.size * 4.0; 
+    let sizeNDC = (quadSize / w) * 2.0;
     
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
@@ -319,20 +335,17 @@ fn vs_main(
     );
     
     let rawOffset = offsets[vIdx] * sizeNDC;
-    
     var adjustedOffset = rawOffset;
     adjustedOffset.y = rawOffset.y * aspect;
 
-    let pos = p.pos + adjustedOffset;
-
     var output: VertexOutput;
-    output.position = vec4f(pos, 0.0, 1.0);
-    output.uv = offsets[vIdx];
+    output.position = vec4f(p.pos + adjustedOffset, 0.0, 1.0);
+    output.uv = offsets[vIdx]; // Coordinates from -1.0 to 1.0
 
     let maxType = i32(params.numTypes) - 1;
     let cType = clamp(i32(round(p.color)), 0, maxType);
-    
     let colorData = colors[cType];
+    
     output.color = vec4f(colorData.r, colorData.g, colorData.b, 1.0);
     
     return output;
@@ -342,41 +355,31 @@ fn vs_main(
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let d2 = dot(input.uv, input.uv); 
     
-    // Discard outside circle
+    // Circular clipping
     if (d2 > 1.0) {
         discard;
     }
-    
-    let dist = sqrt(d2);
 
-    // --- Enhanced Glow & AA ---
+    // --- Soft Particle Rendering ---
+    // Instead of a sharp Gaussian, we use a cubic polynomial falloff.
+    // This creates a "bloom" effect where the particle seems to glow.
+    // 1.0 at center, 0.0 at edge.
     
-    // 1. Core: Solid body of the particle
-    // exp(-9.0 * d2) gives a sharp center given the 3x quad size
-    let core = exp(-9.0 * d2);
-    
-    // 2. Glow: Soft, wide halo
-    // Lower coefficient (-3.0) means wider spread
-    let glow = exp(-3.0 * d2) * 0.5;
-    
-    // Combine
-    let intensity = core + glow;
+    let falloff = 1.0 - d2;
+    // Cubic smoothing (x^3) gives a nice soft edge
+    let alphaShape = falloff * falloff * falloff; 
 
-    // Soft edge fade at the boundary of the quad/circle for AA
-    let edgeFade = 1.0 - smoothstep(0.85, 1.0, dist);
+    // Add a hot white core to the center (energy look)
+    // Starts fading in at 60% radius squared
+    let core = smoothstep(0.6, 1.0, falloff);
     
-    // Final Alpha
-    let finalAlpha = intensity * edgeFade * params.opacity;
+    let finalColor = mix(input.color.rgb, vec3f(1.0), core * 0.5);
+    let finalAlpha = alphaShape * params.opacity;
 
-    // Early exit for invisible pixels
+    // Discard very faint pixels to save fill rate
     if (finalAlpha < 0.01) {
         discard;
     }
-
-    // --- Color Dynamics ---
-    // White hot center for "energy" feel
-    let hotness = smoothstep(0.3, 0.0, dist);
-    let finalColor = mix(input.color.rgb, vec3f(1.0), hotness * 0.6);
 
     return vec4f(finalColor * finalAlpha, finalAlpha);
 }
@@ -429,7 +432,8 @@ export class SimulationEngine {
     private mouseInteractionType: number = 0; 
     
     // Rules Texture Config
-    private readonly MAX_RULE_TEXTURE_SIZE = 64;
+    // Optimization: Reduced to 32 to match shader
+    private readonly MAX_RULE_TEXTURE_SIZE = 32;
 
     constructor(canvas: HTMLCanvasElement, onFpsUpdate?: (fps: number) => void) {
         this.canvas = canvas;
@@ -542,9 +546,6 @@ export class SimulationEngine {
                 targets: [{
                     format,
                     blend: {
-                        // Standard blending: Dst = Src*Alpha + Dst*(1-Alpha)
-                        // Src is Black (0,0,0), Alpha is 0.15
-                        // Result: Dst = 0 + Dst * 0.85
                         color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
                         alpha: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' }
                     }
@@ -578,6 +579,8 @@ export class SimulationEngine {
     private createParticleBuffer() {
         if (!this.device) return;
         const count = this.particleCount;
+        // 8 floats per particle = 32 bytes (16-byte aligned).
+        // Format: pos(2), vel(2), color(1), pad(3)
         const data = new Float32Array(count * 8); 
         for(let i=0; i<count; i++) {
             data[i*8 + 0] = Math.random() * 2 - 1;
@@ -617,10 +620,6 @@ export class SimulationEngine {
         if (numTypes === 0) return;
         
         const safeNumTypes = Math.min(numTypes, this.MAX_RULE_TEXTURE_SIZE);
-
-        // Optimization: WebGPU writeTexture supports tight packing for rows.
-        // We do NOT need to pad to 256 bytes per row, unlike copyBufferToTexture.
-        // Format is r8snorm (1 byte per pixel).
         const bytesPerRow = safeNumTypes; 
         const bufferSize = bytesPerRow * safeNumTypes;
         

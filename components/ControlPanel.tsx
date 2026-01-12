@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Activity, Sprout, MousePointer2, Thermometer, ChevronDown, ChevronUp, Sliders, Zap, Grid, Eye } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -268,7 +268,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                         </div>
                     </CollapsibleSection>
 
-                    <CollapsibleSection title="Particles & Colors" icon={<Palette className="w-4 h-4 text-emerald-400"/>}>
+                    <CollapsibleSection title="Particles & Colors" icon={<Palette className="w-4 h-4 text-emerald-400"/>} defaultOpen={false}>
                         <div className="space-y-4">
                             <InputSlider 
                                 label="Count"
@@ -320,7 +320,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                         </div>
                     </CollapsibleSection>
 
-                    <CollapsibleSection title="Physics & Growth" icon={<Zap className="w-4 h-4 text-emerald-400"/>} defaultOpen={true}>
+                    <CollapsibleSection title="Physics & Growth" icon={<Zap className="w-4 h-4 text-emerald-400"/>} defaultOpen={false}>
                          <div className="space-y-4">
                             <div className="flex justify-between items-center bg-white/5 p-2 rounded border border-emerald-500/20">
                                 <div className="flex items-center space-x-2">
@@ -365,7 +365,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                         </div>
                     </CollapsibleSection>
 
-                    <CollapsibleSection title="Matrix Evolution" icon={<Grid className="w-4 h-4 text-emerald-400"/>} defaultOpen={true}>
+                    <CollapsibleSection title="Matrix Evolution" icon={<Grid className="w-4 h-4 text-emerald-400"/>} defaultOpen={false}>
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-400 flex items-center space-x-2">
                                 <span>Status:</span>

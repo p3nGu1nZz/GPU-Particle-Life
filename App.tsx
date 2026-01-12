@@ -16,8 +16,8 @@ const App: React.FC = () => {
   const [colors, setColors] = useState<ColorDefinition[]>(DEFAULT_COLORS);
   
   const [isPaused, setIsPaused] = useState(false);
-  const [isMutating, setIsMutating] = useState(true); 
-  const [mutationRate, setMutationRate] = useState(0.05); 
+  const [isMutating, setIsMutating] = useState(false); 
+  const [mutationRate, setMutationRate] = useState(0.1); 
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
   // Initialize WebGPU Engine
@@ -68,11 +68,6 @@ const App: React.FC = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeGpuPreference]); 
-
-  // Adaptive Time Stepping Logic
-  useEffect(() => {
-      // Just monitoring for now
-  }, [fps]);
 
   // Update logic when Color count changes
   useEffect(() => {
@@ -131,16 +126,15 @@ const App: React.FC = () => {
   }, [isPaused]);
 
   // --- Improved Evolution Algorithm ---
+  // Uses a convolution-like approach to "diffuse" rules, creating related groups of particles
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
       const evolutionInterval = setInterval(() => {
           
-          let totalMagnitude = 0;
-          let totalCells = 0;
-          
           setRules(prevRules => {
               const size = prevRules.length;
+              // Create new matrix
               const nextRules = new Array(size);
               
               for(let i = 0; i < size; i++) {
@@ -149,9 +143,7 @@ const App: React.FC = () => {
                       
                       let neighborSum = 0;
                       
-                      // 3x3 Convolution - Optimized loop
-                      // Weights: Center 0, Orthogonal 1, Diagonal 0.7
-                      // Using explicit indices for performance vs loop overhead
+                      // 3x3 Convolution for localized CA-like behavior
                       const up = (i - 1 + size) % size;
                       const down = (i + 1) % size;
                       const left = (j - 1 + size) % size;
@@ -162,83 +154,56 @@ const App: React.FC = () => {
                       neighborSum += prevRules[i][left];
                       neighborSum += prevRules[i][right];
                       
-                      neighborSum += (prevRules[up][left] + prevRules[up][right] + prevRules[down][left] + prevRules[down][right]) * 0.7;
-
-                      const neighborAvg = neighborSum / 6.8; // 4 + 4*0.7 = 6.8
+                      // Diagonal neighbors with lower weight
+                      const diagSum = (prevRules[up][left] + prevRules[up][right] + prevRules[down][left] + prevRules[down][right]);
+                      
+                      // Weighted Average: Center (4) + Orthogonal (1) + Diagonal (0.25)
+                      // Giving more weight to self-identity creates more stable species
                       const current = prevRules[i][j];
+                      const weightedAvg = (current * 4.0 + neighborSum + diagSum * 0.25) / 9.0;
+
+                      // Stochastic Update Logic
+                      // 1. Diffusion: Smooth out variations
+                      const diffusion = (weightedAvg - current) * 0.15;
                       
-                      // Reaction-Diffusion
-                      const diffusion = (neighborAvg - current) * 0.15;
-                      // Cubic reaction term stabilizes around -1, 0, 1
-                      const reaction = (current - Math.pow(current, 3)) * 0.1;
-                      
+                      // 2. Reaction: Push towards weak interactions to prevent locking
+                      // Minimal decay to keep system energetic
+                      const decay = -current * 0.0001; 
+
+                      // 3. Mutation: Random flips
                       let mutation = 0;
+                      // Higher chance to mutate if cell is near zero (dormant)
+                      let chance = Math.abs(current) < 0.1 ? mutationRate * 0.15 : mutationRate * 0.02;
                       
-                      // Spontaneous Generation in dead zones
-                      const energy = Math.abs(current);
-                      const localEnergy = Math.abs(neighborAvg);
-                      
-                      let effectiveMutationChance = mutationRate * 0.05;
-                      
-                      if (energy < 0.01 && localEnergy < 0.01) {
-                          // Boost restart chance in empty space
-                          effectiveMutationChance = Math.max(0.01, mutationRate * 0.2); 
+                      if (Math.random() < chance) {
+                          mutation = (Math.random() - 0.5) * 0.8;
                       }
 
-                      if (Math.random() < effectiveMutationChance) {
-                          mutation = (Math.random() * 2 - 1) * 0.5;
-                      }
+                      let target = current + diffusion + decay + mutation;
 
-                      let target = current + diffusion + reaction + mutation;
-
-                      // Entropy / Decay to zero to prevent noise buildup
-                      target *= 0.995;
-
-                      // Clamp smoothly
+                      // Soft clamp
                       if (target > 1.0) target = 1.0;
                       if (target < -1.0) target = -1.0;
                       
-                      // Snap to zero if very small (Performance & Stability)
+                      // Snap really small values to zero
                       if (Math.abs(target) < 0.005) target = 0;
 
                       nextRules[i][j] = target;
-                      
-                      totalMagnitude += Math.abs(target);
-                      totalCells++;
                   }
               }
               return nextRules;
           });
           
-          // Auto-balance global force based on matrix saturation
-          if (totalCells > 0) {
-              const avgMagnitude = totalMagnitude / totalCells;
-              
-              const baseForce = DEFAULT_PARAMS.forceFactor;
-              let targetForce = baseForce;
-
-              // If matrix is saturated (chaotic), reduce force
-              if (avgMagnitude > 0.4) targetForce = baseForce * 0.7;
-              // If matrix is sparse (boring), increase force
-              if (avgMagnitude < 0.05) targetForce = baseForce * 1.8;
-
-              if (Math.abs(targetForce - params.forceFactor) > 0.05) {
-                  setParams(p => ({
-                      ...p,
-                      forceFactor: p.forceFactor + (targetForce - p.forceFactor) * 0.1
-                  }));
-              }
-          }
-
-      }, 200);
+      }, 300); // Slower interval for stability
 
       return () => clearInterval(evolutionInterval);
-  }, [isMutating, isPaused, mutationRate, params.forceFactor]);
+  }, [isMutating, isPaused, mutationRate]);
 
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;
+    // Generate clearer structures with sine waves
     const newRules = Array(num).fill(0).map((_, y) => 
-         Array(num).fill(0).map((_, x) => Math.sin(x * 0.2) * Math.cos(y * 0.2) * 0.8 + (Math.random() - 0.5) * 0.2)
+         Array(num).fill(0).map((_, x) => Math.sin(x * 0.5) * Math.cos(y * 0.5))
     );
     setRules(newRules);
   }, [colors.length]);
