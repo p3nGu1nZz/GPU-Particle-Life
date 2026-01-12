@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import ControlPanel from './components/ControlPanel';
 import { DEFAULT_RULES, DEFAULT_PARAMS, DEFAULT_COLORS } from './constants';
-import { SimulationParams, RuleMatrix, ColorDefinition } from './types';
+import { SimulationParams, RuleMatrix, ColorDefinition, SavedConfiguration } from './types';
 import { AlertTriangle } from 'lucide-react';
 import { SimulationEngine } from './simulationEngine';
 
@@ -212,6 +212,18 @@ const App: React.FC = () => {
     engineRef.current?.reset();
   }, []);
 
+  const handleLoadPreset = useCallback((config: SavedConfiguration) => {
+    if (config.params && config.rules && config.colors) {
+        setParams(config.params);
+        setRules(config.rules);
+        setColors(config.colors);
+        // Force reset to ensure types match
+        setTimeout(() => engineRef.current?.reset(), 100);
+    } else {
+        alert("Invalid configuration file");
+    }
+  }, []);
+
   const toggleFullscreen = useCallback(() => {
       if (!document.fullscreenElement) {
           document.documentElement.requestFullscreen().catch(e => {
@@ -259,6 +271,7 @@ const App: React.FC = () => {
         setIsPaused={setIsPaused}
         onReset={handleReset}
         onRandomize={handleRandomizeRules}
+        onLoadPreset={handleLoadPreset}
         fps={fps}
         toggleFullscreen={toggleFullscreen}
         isMutating={isMutating}

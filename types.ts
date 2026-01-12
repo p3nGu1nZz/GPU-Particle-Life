@@ -38,3 +38,9 @@ export interface ColorDefinition {
     b: number;
     name: string; // Hex string for UI convenience
 }
+
+export interface SavedConfiguration {
+    params: SimulationParams;
+    rules: RuleMatrix;
+    colors: ColorDefinition[];
+}

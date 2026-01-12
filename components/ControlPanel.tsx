@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
-import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid } from 'lucide-react';
+import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference, SavedConfiguration } from '../types';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid, Download, Upload } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -13,6 +13,7 @@ interface ControlPanelProps {
     setIsPaused: (p: boolean) => void;
     onReset: () => void;
     onRandomize: () => void;
+    onLoadPreset: (config: SavedConfiguration) => void;
     fps: number;
     toggleFullscreen: () => void;
     isMutating: boolean;
@@ -47,10 +48,11 @@ const CollapsibleSection: React.FC<{
 
 const ControlPanel: React.FC<ControlPanelProps> = ({ 
     params, setParams, rules, setRules, colors, setColors,
-    isPaused, setIsPaused, onReset, onRandomize, fps, toggleFullscreen,
+    isPaused, setIsPaused, onReset, onRandomize, onLoadPreset, fps, toggleFullscreen,
     isMutating, setIsMutating, mutationRate, setMutationRate
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
+    const fileInputRef = useRef<HTMLInputElement>(null);
     
     // Gear Icon Visibility Logic
     const [isGearVisible, setIsGearVisible] = useState(false);
@@ -131,6 +133,35 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         setColors(newColors);
     };
 
+    const handleSave = () => {
+        const config: SavedConfiguration = { params, rules, colors };
+        const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'particle-life-config.json';
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const config = JSON.parse(ev.target?.result as string);
+                onLoadPreset(config);
+            } catch (err) {
+                console.error(err);
+                alert("Failed to parse JSON configuration.");
+            }
+        };
+        reader.readAsText(file);
+        // Reset value to allow re-selecting same file
+        e.target.value = '';
+    };
+
     return (
         <>
             {/* Toggle Button Container */}
@@ -179,7 +210,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                 <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
                     
                     {/* Play Controls */}
-                    <div className="grid grid-cols-4 gap-2 mb-6">
+                    <div className="grid grid-cols-4 gap-2 mb-2">
                         <button
                             onClick={() => setIsPaused(!isPaused)}
                             className={`col-span-2 flex items-center justify-center space-x-2 py-2 rounded-lg font-medium text-sm transition-all ${isPaused ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300'}`}
@@ -189,20 +220,46 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                         </button>
                         
                         <button 
-                            onClick={onRandomize}
-                            className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg flex items-center justify-center transition-colors"
-                            title="Randomize Rules"
-                        >
-                            <RefreshCw className="w-4 h-4" />
-                        </button>
-                        
-                        <button 
                             onClick={onReset}
                             className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg flex items-center justify-center transition-colors"
                             title="Respawn Particles"
                         >
                             <RotateCcw className="w-4 h-4" />
                         </button>
+                        
+                        <button 
+                            onClick={onRandomize}
+                            className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg flex items-center justify-center transition-colors"
+                            title="Randomize Rules"
+                        >
+                            <RefreshCw className="w-4 h-4" />
+                        </button>
+                    </div>
+
+                    {/* Save/Load Controls */}
+                    <div className="grid grid-cols-2 gap-2 mb-6">
+                        <button 
+                            onClick={handleSave}
+                            className="flex items-center justify-center space-x-1 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded-lg transition-colors border border-white/5"
+                            title="Save Configuration"
+                        >
+                            <Download className="w-3 h-3" />
+                            <span>Save Preset</span>
+                        </button>
+                        <label 
+                            className="flex items-center justify-center space-x-1 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded-lg transition-colors border border-white/5 cursor-pointer"
+                            title="Load Configuration"
+                        >
+                            <Upload className="w-3 h-3" />
+                            <span>Load Preset</span>
+                            <input 
+                                type="file" 
+                                ref={fileInputRef}
+                                onChange={handleFileChange}
+                                accept=".json"
+                                className="hidden"
+                            />
+                        </label>
                     </div>
 
                     <CollapsibleSection title="Display & Render" icon={<Monitor className="w-4 h-4 text-emerald-400"/>} defaultOpen={false}>
