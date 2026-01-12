@@ -125,83 +125,97 @@ const App: React.FC = () => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
 
-  // --- Improved Evolution Algorithm ---
-  // Uses a convolution-like approach to "diffuse" rules, creating related groups of particles
+  // --- Improved Evolutionary Algorithm ---
+  // Uses interaction archetypes (Attract, Repel, Chase) to evolve the matrix
+  // towards interesting particle behaviors rather than random noise.
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
       const evolutionInterval = setInterval(() => {
-          
           setRules(prevRules => {
               const size = prevRules.length;
+              // Deep copy to avoid mutating state directly
+              const nextRules = prevRules.map(row => [...row]); 
 
-              // 1. Calculate Global Average for Homeostasis
-              // This prevents the entire matrix from becoming all Green (attract) or all Red (repel)
-              let sum = 0;
-              for(let r=0; r<size; r++) {
-                  for(let c=0; c<size; c++) {
-                      sum += prevRules[r][c];
+              // Determine number of mutations based on rate
+              // e.g., 0.02 * 1024 cells = ~20 cell updates (10 pairs) per tick
+              const numPairs = size * size;
+              const updatesCount = Math.ceil(numPairs * mutationRate); 
+
+              for (let k = 0; k < updatesCount; k++) {
+                  // Pick a random pair (I, J)
+                  const i = Math.floor(Math.random() * size);
+                  const j = Math.floor(Math.random() * size);
+
+                  // 1. Interaction Strategy Mutation
+                  // We apply forces in coupled pairs to create structured behavior
+                  
+                  const strategy = Math.random();
+                  const strength = 0.1; // Strength of the mutation nudge
+
+                  if (strategy < 0.4) {
+                      // SYMMETRY (Binding/Crystalizing)
+                      // Tend towards I and J having the same feeling about each other (Cluster)
+                      // Pull them towards their average, then nudge up or down
+                      const avg = (nextRules[i][j] + nextRules[j][i]) / 2;
+                      const nudge = (Math.random() - 0.5) * strength;
+                      const target = avg + nudge;
+                      
+                      // Blend towards target
+                      nextRules[i][j] = nextRules[i][j] * 0.9 + target * 0.1;
+                      nextRules[j][i] = nextRules[j][i] * 0.9 + target * 0.1;
+                  } 
+                  else if (strategy < 0.7) {
+                      // ASYMMETRY (Flow/Chase)
+                      // Tend towards I and J having opposite feelings (Predator/Prey)
+                      // I likes J, J dislikes I
+                      nextRules[i][j] += strength * 0.5;
+                      nextRules[j][i] -= strength * 0.5;
+                  } 
+                  else if (strategy < 0.9) {
+                      // REPULSION (Spacing)
+                      // Both dislike each other
+                      nextRules[i][j] -= strength * 0.5;
+                      nextRules[j][i] -= strength * 0.5;
+                  }
+                  else {
+                      // RANDOM (Drift)
+                      nextRules[i][j] += (Math.random() - 0.5) * strength;
                   }
               }
-              const globalAvg = sum / (size * size);
-              // Push against the dominant color to maintain diversity
-              const homeostasisForce = -globalAvg * 0.15; 
 
-              // Create new matrix
-              const nextRules = new Array(size);
+              // 2. Global Diffusion & Decay
+              // Smooths out the matrix to create "families" of particle types
+              // Uses a temporary buffer to calculate averages
+              const tempRules = nextRules.map(row => [...row]);
               
-              for(let i = 0; i < size; i++) {
-                  nextRules[i] = new Array(size);
-                  for(let j = 0; j < size; j++) {
+              for (let i = 0; i < size; i++) {
+                  for (let j = 0; j < size; j++) {
+                      // 4-Neighbor Diffusion in Rule Space
+                      const n1 = tempRules[(i + 1) % size][j];
+                      const n2 = tempRules[(i - 1 + size) % size][j];
+                      const n3 = tempRules[i][(j + 1) % size];
+                      const n4 = tempRules[i][(j - 1 + size) % size];
                       
-                      let neighborSum = 0;
+                      const avg = (n1 + n2 + n3 + n4) / 4.0;
                       
-                      // 3x3 Convolution for localized structure (Cellular Automata-like)
-                      const up = (i - 1 + size) % size;
-                      const down = (i + 1) % size;
-                      const left = (j - 1 + size) % size;
-                      const right = (j + 1) % size;
-
-                      neighborSum += prevRules[up][j];
-                      neighborSum += prevRules[down][j];
-                      neighborSum += prevRules[i][left];
-                      neighborSum += prevRules[i][right];
+                      // Blend self with neighbors (Diffusion) - 1% blend
+                      let val = tempRules[i][j] * 0.99 + avg * 0.01;
                       
-                      // Diagonal neighbors with lower weight
-                      const diagSum = (prevRules[up][left] + prevRules[up][right] + prevRules[down][left] + prevRules[down][right]);
-                      
-                      const current = prevRules[i][j];
-                      
-                      // Calculate Local Average (Diffusion Target)
-                      const localAvg = (neighborSum + diagSum * 0.7) / 6.8; 
-                      
-                      // Diffusion: Smooth out variations locally
-                      const diffusion = (localAvg - current) * 0.1;
-
-                      // Mutation: Random chance to flip
-                      let mutation = 0;
-                      if (Math.random() < mutationRate * 0.1) {
-                          mutation = (Math.random() - 0.5) * 0.5;
-                      }
-
-                      // Apply Forces
-                      let target = current + diffusion + mutation + homeostasisForce;
-
-                      // Entropy / Decay:
-                      // Slowly pull values towards 0 to prevent getting stuck at -1 or 1 limits indefinitely
-                      target *= 0.99;
+                      // Slow decay to 0 (Entropy) to prevent saturation at -1/1 limits
+                      val *= 0.999; 
 
                       // Clamp
-                      if (target > 1.0) target = 1.0;
-                      if (target < -1.0) target = -1.0;
-                      
-                      nextRules[i][j] = target;
+                      if (val > 1.0) val = 1.0;
+                      if (val < -1.0) val = -1.0;
+
+                      nextRules[i][j] = val;
                   }
               }
+
               return nextRules;
           });
-          
-      }, 200); // 5 updates per second
+      }, 100); // 10Hz update rate
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate]);
