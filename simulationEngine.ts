@@ -215,48 +215,57 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         var p = particles[index]; 
         let speed = length(p.vel);
 
-        // --- Adaptive Friction ---
-        // Calculate a "crowding" factor based on local density
-        // Increased threshold range so particles can clump tighter before stalling
-        let crowding = smoothstep(5.0, 30.0, localDensity);
-        
-        // Base friction (velocity retention)
-        var currentFriction = params.friction;
-        
-        // 1. Density-based damping: High density -> increased drag
-        currentFriction = mix(currentFriction, currentFriction * 0.5, crowding);
-        
-        // 2. Speed-based damping: Aerodynamic drag limit
-        let drag = smoothstep(0.0, 3.0, speed);
-        currentFriction = mix(currentFriction, currentFriction * 0.9, drag);
+        // --- Improved Physics Dynamics ---
 
-        // --- Adaptive Temperature (Brownian Motion) ---
+        // 1. Crowd Damping (Stability)
+        // High local density = high pressure. We increase drag to prevent numerical explosions.
+        // localDensity accumulates (1.0 - dist/rMax). 
+        // A value of 20.0 means ~40 neighbors at half radius.
+        let crowding = smoothstep(10.0, 80.0, localDensity);
+        
+        // 2. Speed limit (Aerodynamics)
+        let aerodynamic = smoothstep(0.0, 2.0, speed); // 0 to 1 as speed goes 0 to 2
+
+        // Base Friction
+        var frict = params.friction;
+        
+        // Apply Crowd Damping: Reduces velocity retention when crowded
+        frict = mix(frict, frict * 0.4, crowding);
+        
+        // Apply Aero Damping: Caps max speed softly
+        frict = mix(frict, frict * 0.9, aerodynamic);
+
+        // --- Adaptive Temperature ---
         if (params.temperature > 0.001) {
-             let seed = myPos + vec2f(params.time * 60.0, f32(index) * 0.1337);
+             let seed = myPos + vec2f(params.time * 60.0, f32(index) * 0.7123);
              let randDir = rand2(seed); 
 
-             var noiseMag = params.temperature;
+             // Base magnitude scaled by parameter
+             var noiseVal = params.temperature;
              
-             // Stagnation boost: Help slow particles move
-             let stagnation = 1.0 - smoothstep(0.0, 0.2, speed);
-             noiseMag *= (1.0 + stagnation * 2.0);
+             // Stagnation Boost: Kick particles stuck in local minima
+             // If speed is low, boost noise.
+             let stagnation = 1.0 - smoothstep(0.0, 0.1, speed);
+             noiseVal *= (1.0 + stagnation * 3.0); 
 
-             // Density boost: Help crowded particles melt
-             noiseMag *= (1.0 + crowding * 1.5);
+             // Crowd "Heat": Densely packed particles vibrate more (simulate pressure)
+             noiseVal *= (1.0 + crowding * 2.0);
              
-             force += randDir * noiseMag;
+             // Scale noise force relative to mass/inertia (implicit mass=1)
+             // We apply this as a force.
+             force += randDir * noiseVal;
         }
 
-        // Force Limiting
+        // Hard Speed Limit (safety)
         let fLen = length(force);
-        let maxForce = 10.0; 
+        let maxForce = 20.0; 
         if (fLen > maxForce) {
             force = (force / fLen) * maxForce;
         }
 
         // Symplectic Euler Integration
         p.vel += force * params.dt;
-        p.vel *= currentFriction; 
+        p.vel *= frict; 
         p.pos += p.vel * params.dt;
         
         // Boundary Wrapping
