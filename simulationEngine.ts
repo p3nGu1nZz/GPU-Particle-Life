@@ -43,6 +43,7 @@ struct Particle {
     pad2: f32,
 };
 
+// Aligned to 16 floats + 4 floats padding = 20 floats (80 bytes)
 struct Params {
     width: f32,
     height: f32,
@@ -60,23 +61,36 @@ struct Params {
     mouseX: f32,
     mouseY: f32,
     mouseType: f32,
-    temperature: f32,
+    temperature: f32, // Thermal Energy
     pad0: f32,
     pad1: f32,
     pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+// Use Texture for Rules Lookup (r8snorm gives free normalization from -128..127 to -1.0..1.0)
 @group(0) @binding(1) var rulesTex: texture_2d<f32>; 
 @group(0) @binding(2) var<uniform> params: Params;
 
 const BLOCK_SIZE = 256u;
+const MAX_TYPES = 64u; // Must match MAX_RULE_TEXTURE_SIZE in TS
 
+// Shared memory for optimized N-Body
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
-var<workgroup> tile_color: array<f32, BLOCK_SIZE>;
+// Optimization: Store types as u32 to avoid repeated casting/rounding in hot loop
+var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
 
+// Pseudo-random hash for noise
 fn hash(p: vec2f) -> f32 {
     return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
+}
+
+// 2D Random for thermal noise
+fn rand2(seed: vec2f) -> vec2f {
+    return vec2f(
+        hash(seed + vec2f(1.0, 0.0)),
+        hash(seed + vec2f(0.0, 1.0))
+    ) * 2.0 - 1.0;
 }
 
 @compute @workgroup_size(256)
@@ -86,146 +100,171 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
     let rMax = params.rMax;
     let rMaxSq = rMax * rMax; 
-    let rMin = params.minDist; 
-    let baseForceFactor = params.forceFactor;
+    let rMaxInv = 1.0 / rMax; 
+    let rMin = params.minDist;
+    let safeRMin = max(0.001, rMin);
     
-    // Adaptation enabled?
+    let mid = (rMax + safeRMin) * 0.5;
+    let rangeFactor = 2.0 / max(0.0001, rMax - safeRMin); 
+    let rMinInv = 1.0 / safeRMin;
+    let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
     
     var myPos = vec2f(0.0);
     var myColor = 0.0;
-    var myVel = vec2f(0.0);
     
     if (index < particleCount) {
         let p = particles[index];
         myPos = p.pos;
         myColor = p.color;
-        myVel = p.vel;
     }
 
     let myType = u32(round(myColor));
     var force = vec2f(0.0, 0.0);
     var newColor = myColor; 
-    
-    // Track stats for "Learning"
-    var neighborCount = 0.0;
-    var stress = 0.0;
-    var dominantNeighborType = -1.0;
-    var maxNeighborCount = 0.0;
-    
-    // We use a small histogram to track neighbor types
-    // Since we can't do arrays easily in this loop structure without register pressure,
-    // we just track the most influential neighbor encountered.
-    var influentialNeighborColor = -1.0;
-    var bestInteractionScore = -999.0;
+    var localDensity = 0.0; 
 
-    // --- Tiled N-Body ---
+    // --- Optimization: Rule Caching ---
+    // Instead of performing a texture fetch for every interaction (N^2),
+    // we pre-load the rule row for 'myType' into private registers (N*Types).
+    // This moves the bottleneck from L1 Cache/Texture Units to ALU/Registers.
+    var myRules: array<f32, 64>;
+    let numTypes = u32(params.numTypes);
+    
+    for (var t = 0u; t < MAX_TYPES; t++) {
+        if (t < numTypes) {
+             // Coordinate: (column=t, row=myType)
+             myRules[t] = textureLoad(rulesTex, vec2u(t, myType), 0).r;
+        } else {
+             myRules[t] = 0.0;
+        }
+    }
+
+    // --- Mouse Interaction ---
+    if (params.mouseType != 0.0) {
+        let mousePos = vec2f(params.mouseX, params.mouseY);
+        var dm = myPos - mousePos;
+        dm = dm - 2.0 * round(dm / 2.0);
+        let distM = length(dm);
+        let mouseRadius = 0.4;
+        
+        if (distM < mouseRadius) {
+            let mForce = (1.0 - distM / mouseRadius) * 5.0; 
+            force += (dm / (distM + 0.001)) * mForce * params.mouseType;
+        }
+    }
+
+    // --- Tiled N-Body Calculation ---
     for (var i = 0u; i < particleCount; i += BLOCK_SIZE) {
         let tile_idx = i + local_id.x;
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
             tile_pos[local_id.x] = p.pos;
-            tile_color[local_id.x] = p.color;
+            // Optimization: Cast to u32 once here, instead of N times in loop
+            tile_type[local_id.x] = u32(round(p.color)); 
         } else {
             tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
+            tile_type[local_id.x] = 0u;
         }
+
         workgroupBarrier(); 
 
         if (index < particleCount) {
             let limit = min(BLOCK_SIZE, particleCount - i);
             for (var j = 0u; j < BLOCK_SIZE; j++) {
-                
+                if (j >= limit) { break; } 
+
                 let otherPos = tile_pos[j];
                 var d = otherPos - myPos;
                 d = d - 2.0 * round(d / 2.0);
                 let d2 = dot(d, d);
 
+                // Optimization: Branching here is efficient as spatial locality usually means groups mostly take/skip together
                 if (d2 > 0.000001 && d2 < rMaxSq) {
-                    let dist = sqrt(d2);
-                    let invDist = 1.0 / dist;
-                    let dir = d * invDist;
-                    
-                    neighborCount += 1.0;
+                    let invDist = inverseSqrt(d2);
+                    let dist = d2 * invDist; 
+                    localDensity += (1.0 - dist * rMaxInv);
 
                     var f = 0.0;
-                    
-                    // --- Soft Body Physics ---
-                    // 1. Core Repulsion (Very Strong, linear)
-                    if (dist < rMin) {
-                        let push = 1.0 - (dist / rMin);
-                        f = -10.0 * push; // Hard core
-                        stress += 1.0; // High stress when squeezed
-                    } 
-                    // 2. Interaction (Lennard-Jones-ish)
-                    else {
-                        let otherType = u32(round(tile_color[j]));
-                        let ruleVal = textureLoad(rulesTex, vec2u(otherType, myType), 0).r;
-                        
-                        // "Life" curve: Peak attraction at center of range
-                        let rNorm = (dist - rMin) / (rMax - rMin); // 0.0 to 1.0
-                        let strength = 1.0 - abs(rNorm - 0.5) * 2.0; // Triangle shape 0->1->0
-                        
-                        f = ruleVal * strength * baseForceFactor;
-                        
-                        // Learning Logic:
-                        // If I am attracted to this neighbor (ruleVal > 0), they are "good".
-                        // If I am repelled (ruleVal < 0) but forced close, that is "bad".
-                        if (ruleVal > bestInteractionScore) {
-                            bestInteractionScore = ruleVal;
-                            influentialNeighborColor = tile_color[j];
+                    if (dist < safeRMin) {
+                        let relDist = dist * rMinInv;
+                        f = -4.0 * (1.0 - relDist); 
+                        if (growthEnabled && dist < 0.02) {
+                             let t = floor(params.time * 2.0); 
+                             let randVal = hash(vec2f(f32(j) + t, f32(index)));
+                             if (randVal < 0.01) { 
+                                 // Cast back to f32 for storage
+                                 newColor = f32(tile_type[j]); 
+                             }
                         }
-                    }
+                    } else {
+                        // Optimization: Register Array Lookup
+                        let otherType = tile_type[j]; 
+                        let ruleVal = myRules[otherType];
 
-                    force += dir * f;
+                        let strength = 1.0 - abs(dist - mid) * rangeFactor;
+                        f = ruleVal * strength;
+                    }
+                    force += d * (invDist * f * baseForceFactor);
                 }
             }
         }
         workgroupBarrier();
     }
 
-    // --- Mouse Force ---
-    if (params.mouseType != 0.0) {
-        let mousePos = vec2f(params.mouseX, params.mouseY);
-        var dm = myPos - mousePos;
-        dm = dm - 2.0 * round(dm / 2.0);
-        let d2m = dot(dm, dm);
-        let mRad = params.rMax * 2.0;
-        if (d2m < mRad * mRad) {
-            let dist = sqrt(d2m);
-            let push = (1.0 - dist/mRad) * 20.0 * params.mouseType;
-            force += (dm/dist) * push;
-            stress += 5.0; // Mouse causes panic
-        }
-    }
-
+    // --- Adaptive Physics Implementation (Thermostat & Jamming) ---
     if (index < particleCount) {
-        var p = particles[index];
+        var p = particles[index]; // Create mutable copy
+
+        // 1. Calculate Local Pressure (Jamming potential)
+        // Values > 30.0 indicate high crowding/solid-like state
+        let pressure = smoothstep(5.0, 40.0, localDensity);
         
-        // --- Biological Differentiation (The "Learning") ---
-        // If the particle is under high stress (jammed or fighting forces),
-        // or if it is lonely (low neighbors), it tries to adapt.
-        if (growthEnabled) {
-            let adaptationThreshold = 0.02; 
-            let randomTick = hash(vec2f(params.time, f32(index)));
-            
-            // Panic switch: If highly stressed, just change color randomly to break lock
-            if (stress > 5.0 && randomTick < 0.01) {
-                newColor = f32(u32(randomTick * params.numTypes) % u32(params.numTypes));
-            }
-            // Social Conformity: If my interactions are bad, become like my best neighbor
-            else if (bestInteractionScore > 0.0 && neighborCount > 2.0 && randomTick < 0.005) {
-                newColor = influentialNeighborColor;
-            }
+        // 2. Dynamic Viscosity (Jamming)
+        // In dense regions, particles "rub" together more, increasing effective drag.
+        // params.friction is a retention factor (0.9 means keep 90% velocity).
+        // Higher pressure -> Lower retention -> Higher Drag.
+        let dynamicViscosity = mix(params.friction, params.friction * 0.6, pressure);
+        
+        // 3. Statistical Mechanics Thermostat
+        // We calculate kinetic energy to regulate temperature dynamically.
+        let speed = length(p.vel);
+        let kineticEnergy = 0.5 * speed * speed;
+        
+        // Phase Transition Logic:
+        // High density regions ("solids") need HIGHER temperature to melt/flow.
+        // Low density regions ("gas") need LOWER temperature to condense/form structures.
+        let targetTemp = params.temperature * (1.0 + pressure * 2.0);
+        
+        // Feedback Loop:
+        // If particle has high KE, add less noise (cool down).
+        // If particle has low KE, add more noise (heat up).
+        // This prevents explosions and keeps the system active.
+        let energyDeficit = max(0.0, targetTemp - kineticEnergy);
+        
+        // Scale thermal force by the deficit
+        // Use a time-variant seed to ensure true Brownian motion
+        let seed = myPos + vec2f(params.time * 100.0, f32(index) * 0.123);
+        let thermalForce = rand2(seed) * sqrt(energyDeficit) * 0.5;
+        
+        force += thermalForce;
+
+        // Force Limiter (Safety)
+        let fLen = length(force);
+        let maxForce = 50.0; 
+        if (fLen > maxForce) {
+            force = (force / fLen) * maxForce;
         }
 
-        // Integration
+        // Symplectic Euler Integration
         p.vel += force * params.dt;
-        p.vel *= params.friction;
+        p.vel *= dynamicViscosity; // Apply dynamic drag
         p.pos += p.vel * params.dt;
-        p.pos = p.pos - 2.0 * round(p.pos / 2.0);
-        p.color = newColor;
-        p.pad0 = stress; // Store stress for debug/viz if needed
         
+        // Boundary Wrapping
+        p.pos = p.pos - 2.0 * round(p.pos / 2.0);
+        
+        p.color = newColor; 
         particles[index] = p;
     }
 }
@@ -276,42 +315,90 @@ struct Color {
 @group(0) @binding(3) var<storage, read> colors: array<Color>;
 
 @vertex
-fn vs_main(@builtin(vertex_index) vIdx: u32, @builtin(instance_index) iIdx: u32) -> VertexOutput {
+fn vs_main(
+    @builtin(vertex_index) vIdx: u32,
+    @builtin(instance_index) iIdx: u32
+) -> VertexOutput {
     let p = particles[iIdx];
+    
+    // Safety check for width/height
     let w = max(1.0, params.width);
     let h = max(1.0, params.height);
     let aspect = w / h;
-    let sizeNDC = (params.size * 3.0 / w) * 2.0; // Larger soft glow
+
+    // Expand particle size slightly for glow
+    let sizeNDC = (params.size * 1.5 / w) * 2.0;
     
+    // Standard Quad
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
         vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
     );
+    
     let rawOffset = offsets[vIdx] * sizeNDC;
+    
     var adjustedOffset = rawOffset;
     adjustedOffset.y = rawOffset.y * aspect;
 
+    let pos = p.pos + adjustedOffset;
+
     var output: VertexOutput;
-    output.position = vec4f(p.pos + adjustedOffset, 0.0, 1.0);
+    output.position = vec4f(pos, 0.0, 1.0);
     output.uv = offsets[vIdx];
-    
+
+    // Safely clamp color index to prevent out-of-bounds crash
     let maxType = i32(params.numTypes) - 1;
     let cType = clamp(i32(round(p.color)), 0, maxType);
-    let c = colors[cType];
-    output.color = vec4f(c.r, c.g, c.b, 1.0);
+    
+    let colorData = colors[cType];
+    output.color = vec4f(colorData.r, colorData.g, colorData.b, 1.0);
+    
     return output;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-    let d2 = dot(input.uv, input.uv);
-    if (d2 > 1.0) { discard; }
+    // Distance squared from center in UV space (-1 to 1)
+    let d2 = dot(input.uv, input.uv); 
     
-    // Metaball-like soft falloff
-    let falloff = pow(1.0 - d2, 3.0); 
+    // Discard outside circle to avoid drawing transparent pixels in depth-less pipeline
+    if (d2 > 1.0) {
+        discard;
+    }
     
-    let alpha = falloff * params.opacity;
-    return vec4f(input.color.rgb * alpha, alpha);
+    let dist = sqrt(d2);
+
+    // --- High Quality Glow & Core ---
+    // Core: Sharper gaussian for the "body" of the particle
+    let core = exp(-6.0 * d2);
+    
+    // Halo: Wider, softer gaussian for the glow
+    let halo = exp(-2.0 * d2) * 0.3;
+    
+    // Combine for rich intensity
+    let rawIntensity = core + halo;
+
+    // --- Anti-aliased Edge ---
+    // Smoothly fade out the very edge of the quad circle (last 10% radius)
+    let edgeAlpha = 1.0 - smoothstep(0.9, 1.0, dist);
+    
+    // Apply Global Opacity Setting
+    let finalAlpha = rawIntensity * edgeAlpha * params.opacity;
+
+    // --- Optimization: Early Discard ---
+    // If pixel is invisible, don't write to framebuffer (saves blend ops)
+    if (finalAlpha < 0.005) {
+        discard;
+    }
+
+    // --- Color Dynamics ---
+    // Boost the center towards white to simulate brightness/hotness
+    let whiteCore = smoothstep(0.8, 1.0, core);
+    let finalRgb = mix(input.color.rgb, vec3f(1.0), whiteCore * 0.5);
+
+    // --- Output Premultiplied Alpha ---
+    // WebGPU blending states (add, one-minus-src-alpha) generally expect premultiplied output
+    return vec4f(finalRgb * finalAlpha, finalAlpha);
 }
 `;
 
@@ -547,25 +634,32 @@ export class SimulationEngine {
         if (!this.device || !this.rulesTexture) return;
 
         const numTypes = rules.length;
-        // Align rows to 256 bytes for writeTexture
-        const bytesPerRow = 256; 
-        const bufferSize = bytesPerRow * this.MAX_RULE_TEXTURE_SIZE;
-        const paddedData = new Int8Array(bufferSize);
+        if (numTypes === 0) return;
+        
+        const safeNumTypes = Math.min(numTypes, this.MAX_RULE_TEXTURE_SIZE);
 
-        for (let row = 0; row < numTypes; row++) {
+        // Optimization: WebGPU writeTexture supports tight packing for rows.
+        // We do NOT need to pad to 256 bytes per row, unlike copyBufferToTexture.
+        // Format is r8snorm (1 byte per pixel).
+        const bytesPerRow = safeNumTypes; 
+        const bufferSize = bytesPerRow * safeNumTypes;
+        
+        const data = new Int8Array(bufferSize);
+
+        for (let row = 0; row < safeNumTypes; row++) {
             const rowOffset = row * bytesPerRow;
-            for (let col = 0; col < numTypes; col++) {
+            for (let col = 0; col < safeNumTypes; col++) {
                 // Quantize -1.0..1.0 to -127..127
                 let val = Math.max(-1, Math.min(1, rules[row][col]));
-                paddedData[rowOffset + col] = Math.round(val * 127);
+                data[rowOffset + col] = Math.round(val * 127);
             }
         }
 
         this.device.queue.writeTexture(
             { texture: this.rulesTexture },
-            paddedData,
-            { bytesPerRow: bytesPerRow },
-            { width: this.MAX_RULE_TEXTURE_SIZE, height: this.MAX_RULE_TEXTURE_SIZE }
+            data,
+            { bytesPerRow: bytesPerRow, rowsPerImage: safeNumTypes },
+            { width: safeNumTypes, height: safeNumTypes }
         );
     }
 

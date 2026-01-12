@@ -449,105 +449,66 @@ const MatrixHeatmap: React.FC<{
     colors: ColorDefinition[]
 }> = ({ rules, colors }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
     
+    // Config for internal resolution
+    const headerSize = 10;
+    const padding = 1;
+    const cellSize = 9; 
+    const totalSize = headerSize + colors.length * cellSize;
+
     const draw = useCallback(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no alpha
+        const cvs = canvasRef.current;
+        if (!cvs) return;
+        const ctx = cvs.getContext('2d');
         if (!ctx) return;
 
-        const size = rules.length;
-        if (size === 0) return;
+        // Clear
+        ctx.fillStyle = '#171717'; // neutral-900
+        ctx.fillRect(0, 0, totalSize, totalSize);
 
-        // Set dimensions (1 pixel per rule cell for crisp rendering)
-        if (canvas.width !== size || canvas.height !== size) {
-            canvas.width = size;
-            canvas.height = size;
-        }
+        // Draw Headers (Top and Left)
+        colors.forEach((c, i) => {
+            ctx.fillStyle = c.name;
+            // Top Header (Column colors)
+            ctx.fillRect(headerSize + i * cellSize + padding, 0, cellSize - padding*2, headerSize - padding);
+            // Left Header (Row colors)
+            ctx.fillRect(0, headerSize + i * cellSize + padding, headerSize - padding, cellSize - padding*2);
+        });
 
-        const imgData = ctx.createImageData(size, size);
-        const data = imgData.data;
-
-        // Color Map Logic: Green (Attract, >0) -> Black (0) -> Red (Repel, <0)
-        // NOTE: Physics shader uses Positive = Attract, Negative = Repel (or vice versa depending on impl).
-        // Let's assume standard: Positive = Pull (Attract), Negative = Push (Repel).
-        // Visuals: Positive = Green, Negative = Red.
-        
-        for (let y = 0; y < size; y++) {
-            for (let x = 0; x < size; x++) {
-                const val = rules[y][x]; // -1 to 1
-                const index = (y * size + x) * 4;
-
-                let r = 0, g = 0, b = 0;
-
-                // Scale brightness so small values are visible
-                // Power curve to pop low values: Math.pow(abs(val), 0.7)
-                const intensity = Math.pow(Math.abs(val), 0.6) * 255;
-
+        // Draw Matrix
+        rules.forEach((row, r) => {
+            row.forEach((val, c) => {
+                const x = headerSize + c * cellSize;
+                const y = headerSize + r * cellSize;
+                
+                // Color mapping: Red (-1) -> Black (0) -> Green (1)
                 if (val > 0) {
-                    // Positive (Attraction) -> Green/Cyan
-                    // Use a nice Emerald Green
-                    r = 0;
-                    g = Math.min(255, intensity);
-                    b = Math.min(255, intensity * 0.5); 
+                    const intensity = Math.floor(val * 255);
+                    ctx.fillStyle = `rgb(0, ${intensity}, 0)`;
                 } else {
-                    // Negative (Repulsion) -> Red/Orange
-                    r = Math.min(255, intensity);
-                    g = Math.min(255, intensity * 0.2);
-                    b = 0;
+                    const intensity = Math.floor(Math.abs(val) * 255);
+                    ctx.fillStyle = `rgb(${intensity}, 0, 0)`;
                 }
 
-                data[index] = r;
-                data[index + 1] = g;
-                data[index + 2] = b;
-                data[index + 3] = 255; // Alpha
-            }
-        }
+                ctx.fillRect(x + padding, y + padding, cellSize - padding*2, cellSize - padding*2);
+            });
+        });
 
-        ctx.putImageData(imgData, 0, 0);
-
-    }, [rules]);
+    }, [rules, colors, cellSize, totalSize]);
 
     useEffect(() => {
-        let frameId: number;
-        // Throttle drawing to avoid UI lag on high refresh rate monitors
-        const loop = () => {
-             draw();
-             // Just draw once per update of 'rules', no need to loop constantly 
-             // unless we want to animate the scanline in canvas (we use CSS for that)
-        };
-        
-        // Use requestAnimationFrame just to ensure we draw when browser is ready
-        frameId = requestAnimationFrame(loop);
-        return () => cancelAnimationFrame(frameId);
+        draw();
     }, [draw]);
 
     return (
-        <div ref={containerRef} className="relative w-full aspect-square bg-black border border-white/20 rounded overflow-hidden group">
-             {/* The Heatmap */}
+        <div className="relative w-full max-w-full">
             <canvas 
                 ref={canvasRef}
-                className="w-full h-full block rendering-pixelated"
-                style={{ imageRendering: 'pixelated' }} 
+                width={totalSize}
+                height={totalSize}
+                className="rounded border border-white/10 mx-auto w-full h-auto block"
+                style={{ width: '100%', height: 'auto' }}
             />
-            
-            {/* Scanline Overlay (Visual Polish) */}
-            <div className="absolute inset-0 pointer-events-none bg-gradient-to-b from-transparent via-emerald-500/10 to-transparent opacity-30 animate-scanline" />
-            <div className="absolute inset-0 pointer-events-none shadow-[inset_0_0_20px_rgba(0,0,0,0.8)]" />
-            
-            <style>{`
-                @keyframes scanline {
-                    0% { transform: translateY(-100%); }
-                    100% { transform: translateY(100%); }
-                }
-                .animate-scanline {
-                    animation: scanline 3s linear infinite;
-                }
-                .rendering-pixelated {
-                    image-rendering: pixelated;
-                }
-            `}</style>
         </div>
     );
 };
