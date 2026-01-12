@@ -125,97 +125,94 @@ const App: React.FC = () => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
 
-  // --- Improved Evolutionary Algorithm ---
-  // Uses interaction archetypes (Attract, Repel, Chase) to evolve the matrix
-  // towards interesting particle behaviors rather than random noise.
+  // --- Balanced Evolutionary Algorithm ---
+  // Uses target-based interpolation to prevent value drift and ensures 
+  // a mix of Attraction, Repulsion, and Flow dynamics.
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
       const evolutionInterval = setInterval(() => {
           setRules(prevRules => {
               const size = prevRules.length;
-              // Deep copy to avoid mutating state directly
               const nextRules = prevRules.map(row => [...row]); 
 
-              // Determine number of mutations based on rate
-              // e.g., 0.02 * 1024 cells = ~20 cell updates (10 pairs) per tick
-              const numPairs = size * size;
-              const updatesCount = Math.ceil(numPairs * mutationRate); 
+              // Calculate Global Average to detect drift
+              let globalSum = 0;
+              for(let r=0; r<size; r++) {
+                  for(let c=0; c<size; c++) {
+                      globalSum += prevRules[r][c];
+                  }
+              }
+              const globalAvg = globalSum / (size * size);
+              // If average is too negative, bias towards attraction.
+              // If average is too positive, bias towards repulsion.
+              const driftCorrection = -globalAvg * 0.5;
 
-              for (let k = 0; k < updatesCount; k++) {
-                  // Pick a random pair (I, J)
+              // Number of mutations to perform
+              const numMutations = Math.ceil(size * size * mutationRate); 
+
+              for (let k = 0; k < numMutations; k++) {
                   const i = Math.floor(Math.random() * size);
                   const j = Math.floor(Math.random() * size);
-
-                  // 1. Interaction Strategy Mutation
-                  // We apply forces in coupled pairs to create structured behavior
                   
+                  // Strategy Selection
                   const strategy = Math.random();
-                  const strength = 0.1; // Strength of the mutation nudge
+                  
+                  // Interpolation strength (how fast we move towards the target interaction)
+                  const lerpRate = 0.1; 
 
-                  if (strategy < 0.4) {
-                      // SYMMETRY (Binding/Crystalizing)
-                      // Tend towards I and J having the same feeling about each other (Cluster)
-                      // Pull them towards their average, then nudge up or down
-                      const avg = (nextRules[i][j] + nextRules[j][i]) / 2;
-                      const nudge = (Math.random() - 0.5) * strength;
-                      const target = avg + nudge;
+                  if (strategy < 0.3) {
+                      // BINDING (Attraction) - Target +1.0
+                      // Strongly pulls particles together
+                      // Apply Drift Correction here to balance system
+                      const target = 0.5 + Math.random() * 0.5 + driftCorrection;
                       
-                      // Blend towards target
-                      nextRules[i][j] = nextRules[i][j] * 0.9 + target * 0.1;
-                      nextRules[j][i] = nextRules[j][i] * 0.9 + target * 0.1;
+                      nextRules[i][j] = nextRules[i][j] * (1 - lerpRate) + target * lerpRate;
+                      if (i !== j) {
+                          nextRules[j][i] = nextRules[j][i] * (1 - lerpRate) + target * lerpRate;
+                      }
                   } 
-                  else if (strategy < 0.7) {
-                      // ASYMMETRY (Flow/Chase)
-                      // Tend towards I and J having opposite feelings (Predator/Prey)
-                      // I likes J, J dislikes I
-                      nextRules[i][j] += strength * 0.5;
-                      nextRules[j][i] -= strength * 0.5;
+                  else if (strategy < 0.6) {
+                      // SEPARATION (Repulsion) - Target -1.0
+                      // Keeps particles apart
+                      const target = -0.5 - Math.random() * 0.5 + driftCorrection;
+                      
+                      nextRules[i][j] = nextRules[i][j] * (1 - lerpRate) + target * lerpRate;
+                      if (i !== j) {
+                          nextRules[j][i] = nextRules[j][i] * (1 - lerpRate) + target * lerpRate;
+                      }
                   } 
                   else if (strategy < 0.9) {
-                      // REPULSION (Spacing)
-                      // Both dislike each other
-                      nextRules[i][j] -= strength * 0.5;
-                      nextRules[j][i] -= strength * 0.5;
+                      // FLOW (Asymmetry) - Targets +1 / -1
+                      // Creates motion chains (Predator/Prey)
+                      // No drift correction here as average is 0
+                      const targetA = 0.5 + Math.random() * 0.5;
+                      const targetB = -0.5 - Math.random() * 0.5;
+
+                      nextRules[i][j] = nextRules[i][j] * (1 - lerpRate) + targetA * lerpRate;
+                      if (i !== j) {
+                          nextRules[j][i] = nextRules[j][i] * (1 - lerpRate) + targetB * lerpRate;
+                      }
                   }
                   else {
-                      // RANDOM (Drift)
-                      nextRules[i][j] += (Math.random() - 0.5) * strength;
+                      // NOISE (Drift)
+                      // Small random nudges
+                      const nudge = (Math.random() - 0.5) * 0.2;
+                      nextRules[i][j] += nudge;
                   }
               }
 
-              // 2. Global Diffusion & Decay
-              // Smooths out the matrix to create "families" of particle types
-              // Uses a temporary buffer to calculate averages
-              const tempRules = nextRules.map(row => [...row]);
-              
-              for (let i = 0; i < size; i++) {
-                  for (let j = 0; j < size; j++) {
-                      // 4-Neighbor Diffusion in Rule Space
-                      const n1 = tempRules[(i + 1) % size][j];
-                      const n2 = tempRules[(i - 1 + size) % size][j];
-                      const n3 = tempRules[i][(j + 1) % size];
-                      const n4 = tempRules[i][(j - 1 + size) % size];
-                      
-                      const avg = (n1 + n2 + n3 + n4) / 4.0;
-                      
-                      // Blend self with neighbors (Diffusion) - 1% blend
-                      let val = tempRules[i][j] * 0.99 + avg * 0.01;
-                      
-                      // Slow decay to 0 (Entropy) to prevent saturation at -1/1 limits
-                      val *= 0.999; 
-
-                      // Clamp
-                      if (val > 1.0) val = 1.0;
-                      if (val < -1.0) val = -1.0;
-
-                      nextRules[i][j] = val;
+              // Clamp values
+              for (let r = 0; r < size; r++) {
+                  for (let c = 0; c < size; c++) {
+                       if (nextRules[r][c] > 1.0) nextRules[r][c] = 1.0;
+                       if (nextRules[r][c] < -1.0) nextRules[r][c] = -1.0;
                   }
               }
 
               return nextRules;
           });
-      }, 100); // 10Hz update rate
+      }, 100); 
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate]);
