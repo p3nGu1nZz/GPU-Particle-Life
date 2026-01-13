@@ -17,7 +17,9 @@ const App: React.FC = () => {
   
   const [isPaused, setIsPaused] = useState(false);
   const [isMutating, setIsMutating] = useState(false); 
-  const [mutationRate, setMutationRate] = useState(0.01); 
+  const [mutationRate, setMutationRate] = useState(0.01);
+  const [driftRate, setDriftRate] = useState(1.0);
+  const [driftStrength, setDriftStrength] = useState(0.02);
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
   // Initialize WebGPU Engine
@@ -125,39 +127,67 @@ const App: React.FC = () => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
 
-  // --- Balanced Evolutionary Algorithm ---
+  // --- Advanced Evolutionary Algorithm ---
   useEffect(() => {
-      if (!isMutating || isPaused) return;
+      if (isPaused) return;
 
       const evolutionInterval = setInterval(() => {
           setRules(prevRules => {
               const size = prevRules.length;
+              // Deep copy
               const nextRules = prevRules.map(row => [...row]); 
 
-              const numMutations = Math.max(1, Math.floor(size * size * mutationRate)); 
+              if (isMutating) {
+                  // --- Active Evolution (High Pressure) ---
+                  const numMutations = Math.max(1, Math.floor(size * size * mutationRate)); 
 
-              for (let k = 0; k < numMutations; k++) {
-                  const i = Math.floor(Math.random() * size);
-                  const j = Math.floor(Math.random() * size);
-                  
-                  // Skip index 0 (Food) from mutations to keep environment stable
-                  if (i === 0 || j === 0) continue;
+                  for (let k = 0; k < numMutations; k++) {
+                      // Select random cell
+                      const i = Math.floor(Math.random() * size);
+                      const j = Math.floor(Math.random() * size);
+                      if (i === 0 || j === 0) continue; // Protect food
 
-                  const strategy = Math.random();
-                  
-                  if (strategy < 0.2) {
-                      // Strong Bind (Organism formation)
-                      nextRules[i][j] = 0.8;
-                  } else if (strategy < 0.4) {
-                      // Strong Repel (Differentiation)
-                      nextRules[i][j] = -0.5;
-                  } else {
-                      // Drift
-                      nextRules[i][j] += (Math.random() - 0.5) * 0.1;
+                      const strategy = Math.random();
+                      
+                      if (strategy < 0.1) {
+                          // Strategy: Gene Transfer (Copy behavior from another type)
+                          // Takes the reaction of Type X to Type J and applies it to Type I
+                          const sourceRow = Math.floor(Math.random() * size);
+                          // Lerp towards the source behavior (Inheritance)
+                          nextRules[i][j] = nextRules[i][j] * 0.8 + nextRules[sourceRow][j] * 0.2;
+                      } else if (strategy < 0.2) {
+                          // Strategy: Enforce Symmetry (Bonding)
+                          // A attracts B, so B should attract A
+                          nextRules[j][i] = nextRules[i][j];
+                      } else if (strategy < 0.3) {
+                          // Strategy: Invert (Predator/Prey flipping)
+                          nextRules[i][j] *= -1;
+                      } else {
+                          // Strategy: Standard Mutation
+                          nextRules[i][j] += (Math.random() - 0.5) * 0.15;
+                      }
+                  }
+              } else {
+                  // --- Genetic Drift (Background Evolution) ---
+                  // Applies subtle variations to keep the system "breathing"
+                  if (Math.random() < driftRate) {
+                      const i = Math.floor(Math.random() * size);
+                      const j = Math.floor(Math.random() * size);
+                      
+                      if (i !== 0 && j !== 0) {
+                          // Small nudge
+                          const delta = (Math.random() - 0.5) * driftStrength;
+                          nextRules[i][j] += delta;
+                          
+                          // Occasional "Sympathetic Drift" - adjust the reciprocal slightly too
+                          if (Math.random() < 0.3) {
+                              nextRules[j][i] += delta * 0.5;
+                          }
+                      }
                   }
               }
               
-              // Clamp
+              // Clamp values to valid physics range [-1.0, 1.0]
               for (let r = 0; r < size; r++) {
                 for (let c = 0; c < size; c++) {
                     // Keep "Food" (Type 0) inert
@@ -173,44 +203,92 @@ const App: React.FC = () => {
       }, 200); 
 
       return () => clearInterval(evolutionInterval);
-  }, [isMutating, isPaused, mutationRate]);
+  }, [isMutating, isPaused, mutationRate, driftRate, driftStrength]);
 
   const handleGenerateOrganisms = useCallback(() => {
     const num = colors.length;
-    // Create a "Polymer Chain" Matrix
+    // Advanced Organism Generation
+    // Concept: Differentiated tissues with specific mechanical properties.
     // Rules:
-    // 1. Type 0 is Background (Inert or slight Repel)
-    // 2. Type X Attracts Type X (Cluster)
-    // 3. Type X Attracts Type X+1 (Chain)
-    // 4. Type X Repels Type X+2... (Differentiation)
+    // 1. Nutrients (Type 0): Inert background, eaten by specific "feeder" types.
+    // 2. Tissue (Type i): Strongly binds to itself. Higher types are "tougher" (skin).
+    // 3. Skeleton (Type i, i+1): Binds to immediate neighbors to form chains.
+    // 4. Stiffness (Type i, i+2): Repels second neighbors to prevent chain collapse.
+    // 5. Segregation (Type i, i>2): Strong repulsion to keep different tissues distinct.
     
     const newRules = Array(num).fill(0).map((_, row) => 
          Array(num).fill(0).map((_, col) => {
-             // Background rules
-             if (row === 0 || col === 0) return -0.01;
+             // --- 1. Nutrient / Background Interactions ---
+             if (row === 0) {
+                 // Nutrients are slightly repelled by everything to maintain ambient pressure
+                 // This prevents them from clumping inside organisms excessively
+                 return -0.05; 
+             }
+             if (col === 0) {
+                 // "Mouths": Low index types (1-3) attract nutrients for growth/metabolism
+                 // This causes organisms to orient towards food
+                 if (row <= 3) return 0.5; 
+                 return 0.0; 
+             }
 
-             // Self-assembly (Cluster)
-             if (row === col) return 0.6;
+             const dist = col - row;
+             const absDist = Math.abs(dist);
+
+             // --- 2. Self-Cohesion (Tissue Integrity) ---
+             if (absDist === 0) {
+                 // Higher index types (Skin/Shell) are tougher (higher cohesion)
+                 // Lower index types (Organs) are softer
+                 return 0.6 + (row / num) * 0.4; 
+             }
+
+             // --- 3. Polymer Chain (Skeleton) ---
+             if (absDist === 1) {
+                 // Strong bond with immediate neighbors
+                 // Asymmetry: Pull harder on the next type to create "Head-Tail" directionality
+                 // If col > row (Next), pull strong. If col < row (Prev), pull weak.
+                 return (dist > 0) ? 0.7 : 0.3;
+             }
+
+             // --- 4. Structural Stiffness (Angle limitation) ---
+             if (absDist === 2) {
+                 // Weak repulsion prevents the chain from folding back perfectly on itself
+                 // This creates semi-rigid "bones" or "membranes"
+                 return -0.2;
+             }
              
-             // Chain Formation (A -> B -> C)
-             if (col === row + 1) return 0.4; // Forward bind
-             if (col === row - 1) return 0.4; // Backward bind
+             // --- 5. Complex Distant Interactions ---
+             // Varied attraction/repulsion to encourage folding and non-linear shapes
+             
+             // Secondary Folding: Weak attraction to allow chains to fold back
+             if (absDist === 3) return 0.1;
 
-             // Repulsion from non-neighbors to keep clear distinct organs
-             return -0.4;
+             // Structural Loops: Connect distant parts to form rings/compartments
+             if (absDist === 5 || absDist === 8) return 0.15;
+
+             // Distant Repulsion Gradient
+             // Very distinct types repel strongly to keep "organs" separate
+             if (absDist > num / 2) return -0.6;
+
+             // Varied background repulsion based on parity
+             // Prevents perfect crystallization, encourages organic fuzziness
+             return (absDist % 2 === 0) ? -0.3 : -0.4;
          })
     );
     
     setRules(newRules);
+    
     setParams(p => ({
         ...p,
-        friction: 0.8, // Slick movement
-        forceFactor: 2.0, // Strong bonds
-        rMax: 0.15, // Tight interactions
-        growth: true // Enable Feeding/Decay
+        friction: 0.82, // High friction for stable structures (viscous environment)
+        dt: 0.02,
+        forceFactor: 1.8, // Strong bonding forces
+        rMax: 0.18, // Extended radius to allow complex multi-neighbor interactions
+        minDistance: 0.04, // Distinct particles
+        growth: true, // Enable metabolic cycle
+        temperature: 0.2 // Some thermal noise to vibrate structures into place
     }));
     
-    // Reset to distribute types
+    // Reset to distribute types randomly so they can self-assemble
     setTimeout(() => engineRef.current?.reset(), 100);
   }, [colors.length]);
 
@@ -291,6 +369,10 @@ const App: React.FC = () => {
         setIsMutating={setIsMutating}
         mutationRate={mutationRate}
         setMutationRate={setMutationRate}
+        driftRate={driftRate}
+        setDriftRate={setDriftRate}
+        driftStrength={driftStrength}
+        setDriftStrength={setDriftStrength}
       />
     </div>
   );

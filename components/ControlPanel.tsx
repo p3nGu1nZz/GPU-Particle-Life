@@ -20,6 +20,10 @@ interface ControlPanelProps {
     setIsMutating: (m: boolean) => void;
     mutationRate: number;
     setMutationRate: (r: number) => void;
+    driftRate: number;
+    setDriftRate: (r: number) => void;
+    driftStrength: number;
+    setDriftStrength: (s: number) => void;
 }
 
 const CollapsibleSection: React.FC<{ 
@@ -49,7 +53,8 @@ const CollapsibleSection: React.FC<{
 const ControlPanel: React.FC<ControlPanelProps> = ({ 
     params, setParams, rules, setRules, colors, setColors,
     isPaused, setIsPaused, onReset, onRandomize, onLoadPreset, fps, toggleFullscreen,
-    isMutating, setIsMutating, mutationRate, setMutationRate
+    isMutating, setIsMutating, mutationRate, setMutationRate,
+    driftRate, setDriftRate, driftStrength, setDriftStrength
 }) => {
     const [isMinimized, setIsMinimized] = useState(false);
     const [isFloatingMinimized, setIsFloatingMinimized] = useState(false);
@@ -488,6 +493,24 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                 onChange={(v) => setMutationRate(v)}
                                 formatValue={(v) => `${Math.round(v * 100)}%`}
                             />
+
+                            <div className="pt-2 border-t border-white/5 mt-2">
+                                <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider mb-2 block">Genetic Drift (Background)</span>
+                                <InputSlider 
+                                    label="Drift Rate"
+                                    value={driftRate}
+                                    min={0.0} max={1.0} step={0.05}
+                                    onChange={setDriftRate}
+                                    formatValue={(v) => `${Math.round(v * 100)}%`}
+                                />
+                                <InputSlider 
+                                    label="Drift Strength"
+                                    value={driftStrength}
+                                    min={0.0} max={0.2} step={0.005}
+                                    onChange={setDriftStrength}
+                                    formatValue={(v) => v.toFixed(3)}
+                                />
+                            </div>
                         </div>
 
                         <MatrixHeatmap 

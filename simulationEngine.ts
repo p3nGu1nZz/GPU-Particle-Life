@@ -284,6 +284,7 @@ struct VertexOutput {
     @builtin(position) position: vec4f,
     @location(0) color: vec4f,
     @location(1) uv: vec2f,
+    @location(2) speed: f32,
 };
 
 struct Particle {
@@ -330,6 +331,43 @@ fn vs_main(
 ) -> VertexOutput {
     let p = particles[iIdx];
     
+    // Frustum Culling (Simple Box)
+    // Particles outside [-1.1, 1.1] range are definitely off-screen
+    if (abs(p.pos.x) > 1.1 || abs(p.pos.y) > 1.1) {
+        var cullOut: VertexOutput;
+        cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0); // Move off-clip
+        return cullOut;
+    }
+
+    let maxType = i32(params.numTypes) - 1;
+    let cType = clamp(i32(round(p.color)), 0, maxType);
+    let colorData = colors[cType];
+    
+    // Dim "Food" (Type 0)
+    var alpha = 1.0;
+    if (cType == 0) {
+        alpha = 0.3; 
+    }
+    
+    // --- Alpha Culling & Radius Optimization ---
+    let maxAlpha = params.opacity * colorData.a * alpha;
+    
+    // 1. Cull Invisible
+    if (maxAlpha < 0.01) {
+        var cullOut: VertexOutput;
+        cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
+        return cullOut;
+    }
+
+    // 2. Shrink Quad to Visible Radius
+    // The fragment shader discards if alpha < 0.01.
+    // alpha ~= (1-dist)^2.5 * maxAlpha.
+    // We solve for dist where alpha == 0.01.
+    // dist = 1.0 - (0.01 / maxAlpha)^(1/2.5)
+    let cutoff = pow(0.01 / maxAlpha, 0.4);
+    // Safety clamp to ensure we don't invert or make it too small to see
+    let visibleRadius = clamp(1.0 - cutoff, 0.1, 1.0);
+
     let w = max(1.0, params.width);
     let h = max(1.0, params.height);
     let aspect = w / h;
@@ -337,8 +375,11 @@ fn vs_main(
     // Soft Particle Geometry
     let quadSize = params.size * 4.0; 
     let sizeNDC = (quadSize / w) * 2.0;
+    
+    // Apply Optimization: Scale geometry by visible radius
+    let effectiveSizeNDC = sizeNDC * visibleRadius;
 
-    if (quadSize < 0.5) {
+    if (effectiveSizeNDC < 0.0001) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
         return cullOut;
@@ -349,23 +390,30 @@ fn vs_main(
         vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
     );
     
-    let rawOffset = offsets[vIdx] * sizeNDC;
-    var adjustedOffset = rawOffset;
-    adjustedOffset.y = rawOffset.y * aspect;
+    let rawOffset = offsets[vIdx];
+    
+    // --- Velocity Deformation (Squash & Stretch) ---
+    let speed = length(p.vel);
+    var dir = vec2f(1.0, 0.0);
+    if (speed > 0.001) {
+        dir = p.vel / speed;
+    }
+    let perp = vec2f(-dir.y, dir.x);
+    
+    let stretch = clamp(1.0 + speed * 1.5, 1.0, 2.5);
+    let squash = 1.0 / sqrt(stretch); 
+    
+    let rotOffset = (dir * rawOffset.x * stretch) + (perp * rawOffset.y * squash);
+    
+    var finalOffset = rotOffset * effectiveSizeNDC;
+    finalOffset.y *= aspect; 
 
     var output: VertexOutput;
-    output.position = vec4f(p.pos + adjustedOffset, 0.0, 1.0);
-    output.uv = offsets[vIdx]; 
-
-    let maxType = i32(params.numTypes) - 1;
-    let cType = clamp(i32(round(p.color)), 0, maxType);
-    let colorData = colors[cType];
-    
-    // Dim "Food" (Type 0) to make organisms pop
-    var alpha = 1.0;
-    if (cType == 0) {
-        alpha = 0.3; 
-    }
+    // Z = 0.5 (Mid-depth)
+    output.position = vec4f(p.pos + finalOffset, 0.5, 1.0);
+    // UVs are scaled to match the physical shrink, preserving the gradient logic
+    output.uv = rawOffset * visibleRadius;
+    output.speed = speed;
     
     output.color = vec4f(colorData.r, colorData.g, colorData.b, alpha);
     
@@ -376,22 +424,26 @@ fn vs_main(
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let d2 = dot(input.uv, input.uv); 
     
+    // Discard corners of the circle
     if (d2 > 1.0) {
         discard;
     }
 
-    let falloff = 1.0 - d2;
-    let alphaShape = falloff * falloff * falloff; 
-    let core = smoothstep(0.6, 1.0, falloff);
+    let dist = sqrt(d2);
+    let falloff = 1.0 - dist;
     
-    let finalColor = mix(input.color.rgb, vec3f(1.0), core * 0.5);
-    let finalAlpha = alphaShape * params.opacity * input.color.a;
+    let halo = pow(falloff, 2.5);
+    let core = smoothstep(0.7, 1.0, falloff);
+    let energyGlow = 1.0 + min(input.speed * 2.0, 1.0);
+    
+    let alphaShape = halo * params.opacity * input.color.a;
+    let finalColor = mix(input.color.rgb, vec3f(1.0), core * 0.6) * energyGlow;
 
-    if (finalAlpha < 0.01) {
+    if (alphaShape < 0.01) {
         discard;
     }
 
-    return vec4f(finalColor * finalAlpha, finalAlpha);
+    return vec4f(finalColor * alphaShape, alphaShape);
 }
 `;
 
@@ -408,11 +460,11 @@ export class SimulationEngine {
     
     private particleBuffer: GPUBuffer | null = null;
     private paramsBuffer: GPUBuffer | null = null;
-    // Changed: rulesBuffer is now rulesTexture
     private rulesTexture: GPUTexture | null = null;
     private colorBuffer: GPUBuffer | null = null;
     
     private renderTarget: GPUTexture | null = null;
+    private depthTexture: GPUTexture | null = null; // Depth Buffer
     private textureNeedsClear: boolean = true;
     
     private computeBindGroup: GPUBindGroup | null = null;
@@ -441,8 +493,6 @@ export class SimulationEngine {
     private mouseY: number = 0;
     private mouseInteractionType: number = 0; 
     
-    // Rules Texture Config
-    // Optimization: Reduced to 64 to match shader
     private readonly MAX_RULE_TEXTURE_SIZE = 64;
 
     constructor(canvas: HTMLCanvasElement, onFpsUpdate?: (fps: number) => void) {
@@ -511,6 +561,13 @@ export class SimulationEngine {
         const renderModule = this.device.createShaderModule({ code: RENDER_SHADER });
         const format = (navigator as any).gpu.getPreferredCanvasFormat();
         
+        // Depth Stencil State Config
+        const depthStencilState = {
+            format: 'depth24plus',
+            depthWriteEnabled: false, // Read-only for particles (additive/translucent)
+            depthCompare: 'less-equal',
+        };
+
         this.pipelineAdditive = this.device.createRenderPipeline({
             layout: 'auto',
             vertex: { module: renderModule, entryPoint: 'vs_main' },
@@ -525,6 +582,7 @@ export class SimulationEngine {
                     }
                 }],
             },
+            depthStencil: depthStencilState,
             primitive: { topology: 'triangle-list' },
         });
 
@@ -542,10 +600,10 @@ export class SimulationEngine {
                     }
                 }],
             },
+            depthStencil: depthStencilState,
             primitive: { topology: 'triangle-list' },
         });
         
-        // Setup Fade Pipeline
         const fadeModule = this.device.createShaderModule({ code: FADE_SHADER });
         this.pipelineFade = this.device.createRenderPipeline({
             layout: 'auto',
@@ -560,6 +618,12 @@ export class SimulationEngine {
                         alpha: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' }
                     }
                 }],
+            },
+            // FIX: Must contain depthStencil state matching the render pass attachment
+            depthStencil: {
+                format: 'depth24plus',
+                depthWriteEnabled: false,
+                depthCompare: 'always', 
             },
             primitive: { topology: 'triangle-list' },
         });
@@ -579,6 +643,10 @@ export class SimulationEngine {
         if (this.renderTarget) {
             this.renderTarget.destroy();
             this.renderTarget = null;
+        }
+        if (this.depthTexture) {
+            this.depthTexture.destroy();
+            this.depthTexture = null;
         }
         if (this.rulesTexture) {
             this.rulesTexture.destroy();
@@ -609,11 +677,10 @@ export class SimulationEngine {
     private createRulesTexture(rules: RuleMatrix) {
         if (!this.device) return;
 
-        // Ensure texture exists
         if (!this.rulesTexture) {
             this.rulesTexture = this.device.createTexture({
                 size: [this.MAX_RULE_TEXTURE_SIZE, this.MAX_RULE_TEXTURE_SIZE],
-                format: 'r8snorm', // Signed normalized 8-bit (-1.0 to 1.0)
+                format: 'r8snorm', 
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
             });
         }
@@ -636,7 +703,6 @@ export class SimulationEngine {
         for (let row = 0; row < safeNumTypes; row++) {
             const rowOffset = row * bytesPerRow;
             for (let col = 0; col < safeNumTypes; col++) {
-                // Quantize -1.0..1.0 to -127..127
                 let val = Math.max(-1, Math.min(1, rules[row][col]));
                 data[rowOffset + col] = Math.round(val * 127);
             }
@@ -673,7 +739,6 @@ export class SimulationEngine {
         const scaledWidth = this.windowWidth * this.dpiScale;
         const scaledHeight = this.windowHeight * this.dpiScale;
 
-        // Expanded to 20 floats (80 bytes)
         const data = new Float32Array([
             scaledWidth,
             scaledHeight,
@@ -799,12 +864,22 @@ export class SimulationEngine {
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST 
         });
 
+        // 1. Recreate Color Target
         if (this.renderTarget) this.renderTarget.destroy();
         this.renderTarget = this.device.createTexture({
             size: [scaledWidth, scaledHeight],
             format: format,
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
         });
+
+        // 2. Recreate Depth Target
+        if (this.depthTexture) this.depthTexture.destroy();
+        this.depthTexture = this.device.createTexture({
+            size: [scaledWidth, scaledHeight],
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+
         this.textureNeedsClear = true; 
         
         if (this.paramsData && this.paramsBuffer) {
@@ -872,6 +947,12 @@ export class SimulationEngine {
                     loadOp: shouldClear ? 'clear' : 'load',
                     storeOp: 'store',
                 }],
+                depthStencilAttachment: {
+                    view: this.depthTexture!.createView(),
+                    depthClearValue: 1.0,
+                    depthLoadOp: 'clear',
+                    depthStoreOp: 'discard',
+                }
             });
             
             // 1. Draw Fade Quad (Dims the previous frame)
@@ -898,6 +979,12 @@ export class SimulationEngine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
+                depthStencilAttachment: {
+                    view: this.depthTexture!.createView(),
+                    depthClearValue: 1.0,
+                    depthLoadOp: 'clear',
+                    depthStoreOp: 'discard',
+                }
             });
 
             renderPass.setPipeline(pipeline);
