@@ -16,8 +16,8 @@ const App: React.FC = () => {
   const [colors, setColors] = useState<ColorDefinition[]>(DEFAULT_COLORS);
   
   const [isPaused, setIsPaused] = useState(false);
-  const [isMutating, setIsMutating] = useState(true); 
-  const [mutationRate, setMutationRate] = useState(0.02); 
+  const [isMutating, setIsMutating] = useState(false); 
+  const [mutationRate, setMutationRate] = useState(0.01); 
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
 
   // Initialize WebGPU Engine
@@ -126,8 +126,6 @@ const App: React.FC = () => {
   }, [isPaused]);
 
   // --- Balanced Evolutionary Algorithm ---
-  // Uses target-based interpolation to prevent value drift and ensures 
-  // a mix of Attraction, Repulsion, and Flow dynamics.
   useEffect(() => {
       if (!isMutating || isPaused) return;
 
@@ -136,92 +134,90 @@ const App: React.FC = () => {
               const size = prevRules.length;
               const nextRules = prevRules.map(row => [...row]); 
 
-              // Calculate Global Average to detect drift
-              let globalSum = 0;
-              for(let r=0; r<size; r++) {
-                  for(let c=0; c<size; c++) {
-                      globalSum += prevRules[r][c];
-                  }
-              }
-              const globalAvg = globalSum / (size * size);
-              // If average is too negative, bias towards attraction.
-              // If average is too positive, bias towards repulsion.
-              const driftCorrection = -globalAvg * 0.5;
-
-              // Number of mutations to perform
-              const numMutations = Math.ceil(size * size * mutationRate); 
+              const numMutations = Math.max(1, Math.floor(size * size * mutationRate)); 
 
               for (let k = 0; k < numMutations; k++) {
                   const i = Math.floor(Math.random() * size);
                   const j = Math.floor(Math.random() * size);
                   
-                  // Strategy Selection
+                  // Skip index 0 (Food) from mutations to keep environment stable
+                  if (i === 0 || j === 0) continue;
+
                   const strategy = Math.random();
                   
-                  // Interpolation strength (how fast we move towards the target interaction)
-                  const lerpRate = 0.1; 
-
-                  if (strategy < 0.3) {
-                      // BINDING (Attraction) - Target +1.0
-                      // Strongly pulls particles together
-                      // Apply Drift Correction here to balance system
-                      const target = 0.5 + Math.random() * 0.5 + driftCorrection;
-                      
-                      nextRules[i][j] = nextRules[i][j] * (1 - lerpRate) + target * lerpRate;
-                      if (i !== j) {
-                          nextRules[j][i] = nextRules[j][i] * (1 - lerpRate) + target * lerpRate;
-                      }
-                  } 
-                  else if (strategy < 0.6) {
-                      // SEPARATION (Repulsion) - Target -1.0
-                      // Keeps particles apart
-                      const target = -0.5 - Math.random() * 0.5 + driftCorrection;
-                      
-                      nextRules[i][j] = nextRules[i][j] * (1 - lerpRate) + target * lerpRate;
-                      if (i !== j) {
-                          nextRules[j][i] = nextRules[j][i] * (1 - lerpRate) + target * lerpRate;
-                      }
-                  } 
-                  else if (strategy < 0.9) {
-                      // FLOW (Asymmetry) - Targets +1 / -1
-                      // Creates motion chains (Predator/Prey)
-                      // No drift correction here as average is 0
-                      const targetA = 0.5 + Math.random() * 0.5;
-                      const targetB = -0.5 - Math.random() * 0.5;
-
-                      nextRules[i][j] = nextRules[i][j] * (1 - lerpRate) + targetA * lerpRate;
-                      if (i !== j) {
-                          nextRules[j][i] = nextRules[j][i] * (1 - lerpRate) + targetB * lerpRate;
-                      }
-                  }
-                  else {
-                      // NOISE (Drift)
-                      // Small random nudges
-                      const nudge = (Math.random() - 0.5) * 0.2;
-                      nextRules[i][j] += nudge;
+                  if (strategy < 0.2) {
+                      // Strong Bind (Organism formation)
+                      nextRules[i][j] = 0.8;
+                  } else if (strategy < 0.4) {
+                      // Strong Repel (Differentiation)
+                      nextRules[i][j] = -0.5;
+                  } else {
+                      // Drift
+                      nextRules[i][j] += (Math.random() - 0.5) * 0.1;
                   }
               }
-
-              // Clamp values
+              
+              // Clamp
               for (let r = 0; r < size; r++) {
-                  for (let c = 0; c < size; c++) {
-                       if (nextRules[r][c] > 1.0) nextRules[r][c] = 1.0;
-                       if (nextRules[r][c] < -1.0) nextRules[r][c] = -1.0;
-                  }
-              }
+                for (let c = 0; c < size; c++) {
+                    // Keep "Food" (Type 0) inert
+                    if (r === 0 || c === 0) nextRules[r][c] = 0;
+                    
+                    if (nextRules[r][c] > 1.0) nextRules[r][c] = 1.0;
+                    if (nextRules[r][c] < -1.0) nextRules[r][c] = -1.0;
+                }
+            }
 
               return nextRules;
           });
-      }, 100); 
+      }, 200); 
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate]);
 
+  const handleGenerateOrganisms = useCallback(() => {
+    const num = colors.length;
+    // Create a "Polymer Chain" Matrix
+    // Rules:
+    // 1. Type 0 is Background (Inert or slight Repel)
+    // 2. Type X Attracts Type X (Cluster)
+    // 3. Type X Attracts Type X+1 (Chain)
+    // 4. Type X Repels Type X+2... (Differentiation)
+    
+    const newRules = Array(num).fill(0).map((_, row) => 
+         Array(num).fill(0).map((_, col) => {
+             // Background rules
+             if (row === 0 || col === 0) return -0.01;
+
+             // Self-assembly (Cluster)
+             if (row === col) return 0.6;
+             
+             // Chain Formation (A -> B -> C)
+             if (col === row + 1) return 0.4; // Forward bind
+             if (col === row - 1) return 0.4; // Backward bind
+
+             // Repulsion from non-neighbors to keep clear distinct organs
+             return -0.4;
+         })
+    );
+    
+    setRules(newRules);
+    setParams(p => ({
+        ...p,
+        friction: 0.8, // Slick movement
+        forceFactor: 2.0, // Strong bonds
+        rMax: 0.15, // Tight interactions
+        growth: true // Enable Feeding/Decay
+    }));
+    
+    // Reset to distribute types
+    setTimeout(() => engineRef.current?.reset(), 100);
+  }, [colors.length]);
+
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;
-    // Generate clearer structures with sine waves
     const newRules = Array(num).fill(0).map((_, y) => 
-         Array(num).fill(0).map((_, x) => Math.sin(x * 0.5) * Math.cos(y * 0.5))
+         Array(num).fill(0).map((_, x) => (Math.random() * 2 - 1))
     );
     setRules(newRules);
   }, [colors.length]);
@@ -235,7 +231,6 @@ const App: React.FC = () => {
         setParams(config.params);
         setRules(config.rules);
         setColors(config.colors);
-        // Force reset to ensure types match
         setTimeout(() => engineRef.current?.reset(), 100);
     } else {
         alert("Invalid configuration file");
@@ -288,7 +283,7 @@ const App: React.FC = () => {
         isPaused={isPaused}
         setIsPaused={setIsPaused}
         onReset={handleReset}
-        onRandomize={handleRandomizeRules}
+        onRandomize={handleGenerateOrganisms}
         onLoadPreset={handleLoadPreset}
         fps={fps}
         toggleFullscreen={toggleFullscreen}

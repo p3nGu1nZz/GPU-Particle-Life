@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference, SavedConfiguration } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid, Download, Upload, Minimize2, Maximize2 } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid, Download, Upload, Minimize2, Maximize2, DnaOff } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -264,9 +264,9 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                         <button 
                             onClick={onRandomize}
                             className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg flex items-center justify-center transition-colors"
-                            title="Randomize Rules"
+                            title="Generate Organisms"
                         >
-                            <RefreshCw className="w-4 h-4" />
+                            <DnaOff className="w-4 h-4" />
                         </button>
                     </div>
 
@@ -417,8 +417,8 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                 <div className="flex items-center space-x-2">
                                     <Sprout className="w-4 h-4 text-emerald-400" />
                                     <div className="flex flex-col">
-                                        <span className="text-xs text-emerald-100">Bio Growth</span>
-                                        <span className="text-[9px] text-emerald-500/70">Infection mechanic</span>
+                                        <span className="text-xs text-emerald-100">Feed & Decay</span>
+                                        <span className="text-[9px] text-emerald-500/70">Enable Metabolism</span>
                                     </div>
                                 </div>
                                 <button

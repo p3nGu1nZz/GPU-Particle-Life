@@ -95,17 +95,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let rMax = params.rMax;
     let rMaxSq = rMax * rMax; 
     let rMaxInv = 1.0 / rMax; 
-    let rMin = params.minDist;
+    
+    // "Stiff Core" Physics settings
+    // A smaller safeRMin creates "tighter" lattices
+    let rMin = params.minDist; 
     let safeRMin = max(0.001, rMin);
     
-    // Improved Physics Constants
-    let interactionRangeInv = 1.0 / (rMax - safeRMin);
-
     let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
     
-    // Precalculate seed base for growth to avoid calculating per-neighbor
-    let growthSeedBase = params.time + f32(index) * 0.123;
+    // Seed for biological functions
+    let bioSeed = params.time + f32(index) * 0.123;
+    let randomVal = fast_hash(vec2f(bioSeed, f32(index)));
     
     var myPos = vec2f(0.0);
     var myColor = 0.0;
@@ -120,6 +121,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var force = vec2f(0.0, 0.0);
     var newColor = myColor; 
     var localDensity = 0.0; 
+    var nearNeighbors = 0.0;
 
     // --- Optimization: Rule Caching ---
     var myRules: array<f32, 64>;
@@ -140,10 +142,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         let rawD = myPos - mousePos;
         let dm = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
         let distM = length(dm);
-        let mouseRadius = params.width * 0.0003; // Dynamic radius based on screen size approx
         
-        if (distM < 0.4) { // Hard coded mouse radius for now
-             let mForce = (1.0 - distM / 0.4) * 5.0; 
+        if (distM < 0.4) { 
+             let mForce = (1.0 - distM / 0.4) * 10.0; 
              force += (dm / (distM + 0.001)) * mForce * params.mouseType;
         }
     }
@@ -152,7 +153,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     for (var i = 0u; i < particleCount; i += BLOCK_SIZE) {
         let tile_idx = i + local_id.x;
         
-        // Load tile into Shared Memory (Workgroup)
         if (tile_idx < particleCount) {
             let p = particles[tile_idx];
             tile_pos[local_id.x] = p.pos;
@@ -167,17 +167,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         if (index < particleCount) {
             let limit = min(BLOCK_SIZE, particleCount - i);
             
-            // Unrolling 4x could help here, but WGSL compiler usually handles this loop well
             for (var j = 0u; j < BLOCK_SIZE; j++) {
                 if (j >= limit) { break; } 
 
                 let otherPos = tile_pos[j];
                 let rawD = otherPos - myPos;
-                // Fast Wrapping: (fract(val/2 + 0.5) * 2) - 1
                 let d = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
                 let d2 = dot(d, d);
 
-                // Early Exit: Skip if out of range or self (d2 very small)
+                // Early Exit
                 if (d2 > rMaxSq || d2 < 0.000001) {
                     continue;
                 }
@@ -185,26 +183,41 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 let invDist = inverseSqrt(d2);
                 let dist = d2 * invDist; // = sqrt(d2)
                 
-                // Density accumulation
+                // Density for Crowd Control
                 localDensity += (1.0 - dist * rMaxInv);
 
-                var f = 0.0;
-                if (dist < safeRMin) {
-                    // Repulsion: Stronger, but smoother falloff relative to overlap
-                    f = -3.0 * (1.0 - (dist / safeRMin));
+                // Metabolic Neighbor Counting (Very close)
+                if (growthEnabled && dist < 0.05) {
+                    nearNeighbors += 1.0;
                     
-                    // Optimized Growth / Infection Logic
-                    if (growthEnabled && dist < 0.02) {
-                         // Use simplified hash check for performance
-                         if (fast_hash(vec2f(growthSeedBase, f32(j))) < 0.01) { 
-                             newColor = f32(tile_type[j]); 
-                         }
+                    // Feeding Logic:
+                    // If I am Food (Type 0) and neighbor is Life (Type > 0), I might become Life.
+                    // This creates growth at the edges of organisms.
+                    if (myType == 0u && tile_type[j] > 0u) {
+                        // Growth probability check
+                        if (randomVal < 0.005) {
+                            newColor = f32(tile_type[j]);
+                        }
                     }
+                }
+
+                var f = 0.0;
+                
+                if (dist < safeRMin) {
+                    // STIFF CORE PHYSICS
+                    // Instead of linear repulsion, use a power curve to create "solid" particles
+                    // This prevents particles from merging into a single point, enabling "tissues"
+                    let repulse = 1.0 - (dist / safeRMin);
+                    f = -20.0 * repulse * repulse; // Strong exponential repulsion
                 } else {
-                    // Attraction/Repulsion
-                    let q = (dist - safeRMin) * interactionRangeInv;
+                    // BONDING PHYSICS
+                    // Use a curve that supports equilibrium at specific distances
+                    let q = (dist - safeRMin) / (rMax - safeRMin);
+                    
+                    // Standard envelope: 4 * q * (1-q)
+                    // We modify it to maintain force longer to create "chains"
                     let envelope = 4.0 * q * (1.0 - q);
-                    // Use cached rule
+                    
                     f = myRules[tile_type[j]] * envelope;
                 }
                 
@@ -218,52 +231,46 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         var p = particles[index]; 
         let speed = length(p.vel);
 
-        // --- Improved Physics Dynamics ---
+        // --- Metabolic Decay (Apoptosis) ---
+        // If enabled, complex life regulates itself
+        if (growthEnabled && myType > 0u) {
+            // Die if too crowded (Pressure death) OR too lonely (Isolation death)
+            // But only with a small chance to avoid flickering
+            let overCrowded = nearNeighbors > 15.0; 
+            let lonely = nearNeighbors < 1.0;
+            
+            if ((overCrowded || lonely) && randomVal < 0.02) {
+                newColor = 0.0; // Return to Food
+            }
+        }
 
-        // 1. Crowd Damping (Stability)
-        let crowding = smoothstep(10.0, 80.0, localDensity);
+        // --- Physics Dynamics ---
+
+        // Drag/Friction
+        // Organisms act more like they are in a viscous fluid
+        let crowding = smoothstep(5.0, 50.0, localDensity);
         
-        // 2. Speed limit (Aerodynamics)
-        let aerodynamic = smoothstep(0.0, 2.0, speed);
-
-        // Base Friction
         var frict = params.friction;
-        
-        // Apply Crowd Damping
-        frict = mix(frict, frict * 0.4, crowding);
-        // Apply Aero Damping
-        frict = mix(frict, frict * 0.9, aerodynamic);
+        // Increase friction in dense areas to stabilize structures (Gel-like)
+        frict = mix(frict, frict * 0.5, crowding);
 
-        // --- Adaptive Temperature ---
+        // --- Temperature/Brownian Motion ---
         if (params.temperature > 0.001) {
              let seed = myPos + vec2f(params.time * 60.0, f32(index) * 0.7123);
              let randDir = rand2(seed); 
-
-             var noiseVal = params.temperature;
-             
-             // Stagnation Boost
-             let stagnation = 1.0 - smoothstep(0.0, 0.1, speed);
-             noiseVal *= (1.0 + stagnation * 3.0); 
-
-             // Crowd "Heat"
-             noiseVal *= (1.0 + crowding * 2.0);
-             
-             force += randDir * noiseVal;
+             force += randDir * params.temperature;
         }
 
         // Hard Speed Limit (safety)
         let fLen = length(force);
-        let maxForce = 20.0; 
+        let maxForce = 50.0; 
         if (fLen > maxForce) {
             force = (force / fLen) * maxForce;
         }
 
-        // Symplectic Euler Integration
         p.vel += force * params.dt;
         p.vel *= frict; 
         p.pos += p.vel * params.dt;
-        
-        // Boundary Wrapping
         p.pos = fract(p.pos * 0.5 + 0.5) * 2.0 - 1.0;
         
         p.color = newColor; 
@@ -331,12 +338,8 @@ fn vs_main(
     let quadSize = params.size * 4.0; 
     let sizeNDC = (quadSize / w) * 2.0;
 
-    // --- LOD Optimization ---
-    // If the particle is smaller than 0.5 screen pixels, cull it.
-    // This saves rasterization for millions of tiny distant/small particles.
     if (quadSize < 0.5) {
         var cullOut: VertexOutput;
-        // Move vertex behind camera or off-screen
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
         return cullOut;
     }
@@ -352,13 +355,19 @@ fn vs_main(
 
     var output: VertexOutput;
     output.position = vec4f(p.pos + adjustedOffset, 0.0, 1.0);
-    output.uv = offsets[vIdx]; // Coordinates from -1.0 to 1.0
+    output.uv = offsets[vIdx]; 
 
     let maxType = i32(params.numTypes) - 1;
     let cType = clamp(i32(round(p.color)), 0, maxType);
     let colorData = colors[cType];
     
-    output.color = vec4f(colorData.r, colorData.g, colorData.b, 1.0);
+    // Dim "Food" (Type 0) to make organisms pop
+    var alpha = 1.0;
+    if (cType == 0) {
+        alpha = 0.3; 
+    }
+    
+    output.color = vec4f(colorData.r, colorData.g, colorData.b, alpha);
     
     return output;
 }
@@ -367,22 +376,17 @@ fn vs_main(
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let d2 = dot(input.uv, input.uv); 
     
-    // Circular clipping
     if (d2 > 1.0) {
         discard;
     }
 
     let falloff = 1.0 - d2;
-    // Cubic smoothing (x^3) gives a nice soft edge
     let alphaShape = falloff * falloff * falloff; 
-
-    // Add a hot white core to the center (energy look)
     let core = smoothstep(0.6, 1.0, falloff);
     
     let finalColor = mix(input.color.rgb, vec3f(1.0), core * 0.5);
-    let finalAlpha = alphaShape * params.opacity;
+    let finalAlpha = alphaShape * params.opacity * input.color.a;
 
-    // Discard very faint pixels to save fill rate
     if (finalAlpha < 0.01) {
         discard;
     }
@@ -585,8 +589,6 @@ export class SimulationEngine {
     private createParticleBuffer() {
         if (!this.device) return;
         const count = this.particleCount;
-        // 8 floats per particle = 32 bytes (16-byte aligned).
-        // Format: pos(2), vel(2), color(1), pad(3)
         const data = new Float32Array(count * 8); 
         for(let i=0; i<count; i++) {
             data[i*8 + 0] = Math.random() * 2 - 1;
