@@ -364,7 +364,7 @@ fn vs_main(
     @builtin(vertex_index) vIdx: u32,
     @builtin(instance_index) iIdx: u32
 ) -> VertexOutput {
-    // We use High Precision Pos from B for smooth rendering
+    // Access High Precision Position (B)
     let packedB = particlesB[iIdx];
     let pos = unpack2x16float(packedB.x);
     let vel = unpack2x16float(packedB.y);
@@ -372,62 +372,71 @@ fn vs_main(
     let density = state.x;
     let age = state.y;
 
-    // We use Type from A
+    // Access Type (A)
     let packedA = particlesA[iIdx];
     let typeIdx = (packedA >> 24u) & 0xFFu;
     
-    // --- Frustum Culling ---
-    let w = max(1.0, params.width);
-    let maxExtentNDC = (params.size * 10.0 / w) * 2.0; 
-    let cullLimit = 1.0 + maxExtentNDC;
-
-    if (abs(pos.x) > cullLimit || abs(pos.y) > cullLimit) {
+    // --- Screen Dimensions & Culling ---
+    // Ensure we never divide by zero or very small numbers
+    let screenW = max(1.0, params.width);
+    let screenH = max(1.0, params.height);
+    
+    // Frustum culling margin (approximate max particle size in NDC)
+    let maxParticleSizePx = params.size * 8.0; 
+    let maxExtentX = (maxParticleSizePx / screenW) * 2.0;
+    let maxExtentY = (maxParticleSizePx / screenH) * 2.0;
+    
+    // Cull if outside view (plus margin)
+    if (abs(pos.x) > (1.0 + maxExtentX) || abs(pos.y) > (1.0 + maxExtentY)) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0); 
         return cullOut;
     }
 
+    // --- Color & Alpha Logic ---
     let maxType = i32(params.numTypes) - 1;
     let cType = clamp(i32(typeIdx), 0, maxType);
     let colorData = colors[cType];
     
-    var alpha = 1.0;
-    if (cType == 0) {
-        alpha = 0.3; 
-    }
+    var baseAlpha = 1.0;
+    if (cType == 0) { baseAlpha = 0.3; } // Food is transparent
     
     let growthFactor = min(1.0, age * 2.0); 
-    let maxAlpha = params.opacity * colorData.a * alpha * growthFactor;
     
-    if (maxAlpha < 0.01) {
+    // Calculate maximum potential alpha to determine visibility
+    let maxAlpha = params.opacity * colorData.a * baseAlpha * growthFactor;
+    
+    if (maxAlpha < 0.005) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
         return cullOut;
     }
 
-    let cutoff = pow(0.01 / maxAlpha, 0.4);
-    let visibleRadius = clamp(1.0 - cutoff, 0.1, 1.0);
+    // --- Dynamic Sizing ---
+    // Calculate visible radius based on alpha falloff to reduce overdraw
+    // pow(0.01 / maxAlpha, 0.4) estimates where the gaussian dropoff hits ~1% opacity
+    let safeAlpha = max(maxAlpha, 0.001);
+    let cutoff = pow(0.01 / safeAlpha, 0.4);
+    let visibleRadius = clamp(1.0 - cutoff, 0.2, 1.0);
 
-    let h = max(1.0, params.height);
-    let aspect = w / h;
-
-    let quadSize = params.size * 4.0 * growthFactor; 
-    let sizeNDC = (quadSize / w) * 2.0;
-    let effectiveSizeNDC = sizeNDC * visibleRadius;
-
-    if (effectiveSizeNDC < 0.0001) {
+    // Calculate final pixel size
+    let quadSizePx = params.size * 4.0 * growthFactor * visibleRadius;
+    
+    // Don't render sub-pixel particles
+    if (quadSizePx < 0.5) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
         return cullOut;
     }
     
+    // --- Geometry Construction ---
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
         vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
     );
+    let rawOffset = offsets[vIdx]; // [-1, 1]
     
-    let rawOffset = offsets[vIdx];
-    
+    // Velocity Deformation (Stretch/Squash)
     let speed = length(vel);
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
@@ -438,16 +447,21 @@ fn vs_main(
     let stretch = clamp(1.0 + speed * 1.5, 1.0, 2.5);
     let squash = 1.0 / sqrt(stretch); 
     
+    // Apply rotation to the unit offset
     let rotOffset = (dir * rawOffset.x * stretch) + (perp * rawOffset.y * squash);
     
-    var finalOffset = rotOffset * effectiveSizeNDC;
-    finalOffset.y *= aspect; 
+    // Scale to pixels
+    let finalOffsetPx = rotOffset * quadSizePx;
+
+    // Convert pixels to NDC [2.0/W, 2.0/H]
+    let offsetNDC = finalOffsetPx * vec2f(2.0 / screenW, 2.0 / screenH);
+    // Correct Y aspect is implicit because screenH is used directly
 
     var output: VertexOutput;
-    output.position = vec4f(pos + finalOffset, 0.5, 1.0);
-    output.uv = rawOffset * visibleRadius;
+    output.position = vec4f(pos + offsetNDC, 0.5, 1.0);
+    output.uv = rawOffset * visibleRadius; // Pass correct UV scale for fragment shader
     output.speed = speed;
-    output.color = vec4f(colorData.r, colorData.g, colorData.b, alpha);
+    output.color = vec4f(colorData.r, colorData.g, colorData.b, baseAlpha);
     output.extra = vec2f(density, age);
     
     return output;
