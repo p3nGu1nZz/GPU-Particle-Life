@@ -21,6 +21,7 @@ const App: React.FC = () => {
   const [driftRate, setDriftRate] = useState(1.0);
   const [driftStrength, setDriftStrength] = useState(0.02);
   const [activeGpuPreference, setActiveGpuPreference] = useState(DEFAULT_PARAMS.gpuPreference);
+  const [hasInitialized, setHasInitialized] = useState(false);
 
   // Initialize WebGPU Engine
   useEffect(() => {
@@ -127,71 +128,132 @@ const App: React.FC = () => {
     engineRef.current?.setPaused(isPaused);
   }, [isPaused]);
 
-  // --- Advanced Evolutionary Algorithm ---
+  // --- Advanced Organism Generation ---
+  // This constructs a "Life Matrix" designed to create chains, membranes, and internal pressures.
+  const handleGenerateOrganisms = useCallback(() => {
+    const num = colors.length;
+    
+    const newRules = Array(num).fill(0).map((_, row) => 
+         Array(num).fill(0).map((_, col) => {
+             const dist = col - row;
+             const absDist = Math.abs(dist);
+
+             // --- 1. Food (Type 0) Interactions ---
+             if (row === 0) {
+                 // Food is slightly repelled by everything (pressure)
+                 return -0.05; 
+             }
+             if (col === 0) {
+                 // "Mouths": Low index types (1-4) attract food
+                 if (row <= 4) return 0.8; 
+                 return 0.0; 
+             }
+
+             // --- 2. Self-Clustering (Tissue Integrity) ---
+             if (absDist === 0) {
+                 // Cohesion. Higher index = tougher skin
+                 return 0.4 + (row / num) * 0.6; 
+             }
+
+             // --- 3. Chains & Skeletons (Nearest Neighbor) ---
+             if (absDist === 1) {
+                 // Strong bonds to adjacent types create gradient chains
+                 // Asymmetry creates directional flow/movement
+                 return (dist > 0) ? 0.6 : 0.2;
+             }
+
+             // --- 4. Structural Stiffness (Second Neighbor) ---
+             if (absDist === 2) {
+                 // Repulsion to prevent chains from collapsing into points
+                 return -0.3;
+             }
+             
+             // --- 5. Complex Folding ---
+             if (absDist === 3) return 0.1; // Weak attraction for folding
+             
+             // --- 6. Global Separation ---
+             // Distant types repel to keep organs distinct
+             if (absDist > 4) return -0.4;
+
+             return -0.1;
+         })
+    );
+    
+    setRules(newRules);
+    
+    // Set optimal parameters for this life configuration
+    setParams(p => ({
+        ...p,
+        friction: 0.92, // High friction for stable structures
+        dt: 0.02,
+        forceFactor: 2.0, // Strong bonding
+        rMax: 0.18, 
+        minDistance: 0.04, 
+        growth: true, 
+        temperature: 0.15 
+    }));
+    
+    // Reset simulation state
+    setTimeout(() => engineRef.current?.reset(), 50);
+  }, [colors.length]);
+
+  // --- Auto-Start with Complex Organisms ---
+  useEffect(() => {
+      if (!hasInitialized) {
+          handleGenerateOrganisms();
+          setHasInitialized(true);
+      }
+  }, [hasInitialized, handleGenerateOrganisms]);
+
+  // --- Evolutionary Algorithm ---
   useEffect(() => {
       if (isPaused) return;
 
       const evolutionInterval = setInterval(() => {
           setRules(prevRules => {
               const size = prevRules.length;
-              // Deep copy
               const nextRules = prevRules.map(row => [...row]); 
 
               if (isMutating) {
-                  // --- Active Evolution (High Pressure) ---
                   const numMutations = Math.max(1, Math.floor(size * size * mutationRate)); 
 
                   for (let k = 0; k < numMutations; k++) {
-                      // Select random cell
                       const i = Math.floor(Math.random() * size);
                       const j = Math.floor(Math.random() * size);
-                      if (i === 0 || j === 0) continue; // Protect food
+                      // Protect food (row 0) and self-identity (diagonal) slightly
+                      if (i === 0 || j === 0) continue; 
 
                       const strategy = Math.random();
                       
                       if (strategy < 0.1) {
-                          // Strategy: Gene Transfer (Copy behavior from another type)
-                          // Takes the reaction of Type X to Type J and applies it to Type I
-                          const sourceRow = Math.floor(Math.random() * size);
-                          // Lerp towards the source behavior (Inheritance)
-                          nextRules[i][j] = nextRules[i][j] * 0.8 + nextRules[sourceRow][j] * 0.2;
-                      } else if (strategy < 0.2) {
-                          // Strategy: Enforce Symmetry (Bonding)
-                          // A attracts B, so B should attract A
-                          nextRules[j][i] = nextRules[i][j];
-                      } else if (strategy < 0.3) {
-                          // Strategy: Invert (Predator/Prey flipping)
-                          nextRules[i][j] *= -1;
+                          // Copy neighboring strategy
+                          const neighbor = (i + 1) % size;
+                          nextRules[i][j] = nextRules[i][j] * 0.9 + nextRules[neighbor][j] * 0.1;
+                      } else if (strategy < 0.25) {
+                          // Invert interaction
+                          nextRules[i][j] *= -0.5;
                       } else {
-                          // Strategy: Standard Mutation
-                          nextRules[i][j] += (Math.random() - 0.5) * 0.15;
+                          // Standard drift
+                          nextRules[i][j] += (Math.random() - 0.5) * 0.2;
                       }
                   }
               } else {
-                  // --- Genetic Drift (Background Evolution) ---
-                  // Applies subtle variations to keep the system "breathing"
+                  // Genetic Drift
                   if (Math.random() < driftRate) {
                       const i = Math.floor(Math.random() * size);
                       const j = Math.floor(Math.random() * size);
                       
                       if (i !== 0 && j !== 0) {
-                          // Small nudge
-                          const delta = (Math.random() - 0.5) * driftStrength;
-                          nextRules[i][j] += delta;
-                          
-                          // Occasional "Sympathetic Drift" - adjust the reciprocal slightly too
-                          if (Math.random() < 0.3) {
-                              nextRules[j][i] += delta * 0.5;
-                          }
+                          nextRules[i][j] += (Math.random() - 0.5) * driftStrength;
                       }
                   }
               }
               
-              // Clamp values to valid physics range [-1.0, 1.0]
+              // Clamp
               for (let r = 0; r < size; r++) {
                 for (let c = 0; c < size; c++) {
-                    // Keep "Food" (Type 0) inert
-                    if (r === 0 || c === 0) nextRules[r][c] = 0;
+                    if (r === 0 || c === 0) nextRules[r][c] = 0; // Lock food
+                    else if (c === 0 && r <= 4) nextRules[r][c] = 0.8; // Lock mouths
                     
                     if (nextRules[r][c] > 1.0) nextRules[r][c] = 1.0;
                     if (nextRules[r][c] < -1.0) nextRules[r][c] = -1.0;
@@ -204,93 +266,6 @@ const App: React.FC = () => {
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate, driftRate, driftStrength]);
-
-  const handleGenerateOrganisms = useCallback(() => {
-    const num = colors.length;
-    // Advanced Organism Generation
-    // Concept: Differentiated tissues with specific mechanical properties.
-    // Rules:
-    // 1. Nutrients (Type 0): Inert background, eaten by specific "feeder" types.
-    // 2. Tissue (Type i): Strongly binds to itself. Higher types are "tougher" (skin).
-    // 3. Skeleton (Type i, i+1): Binds to immediate neighbors to form chains.
-    // 4. Stiffness (Type i, i+2): Repels second neighbors to prevent chain collapse.
-    // 5. Segregation (Type i, i>2): Strong repulsion to keep different tissues distinct.
-    
-    const newRules = Array(num).fill(0).map((_, row) => 
-         Array(num).fill(0).map((_, col) => {
-             // --- 1. Nutrient / Background Interactions ---
-             if (row === 0) {
-                 // Nutrients are slightly repelled by everything to maintain ambient pressure
-                 // This prevents them from clumping inside organisms excessively
-                 return -0.05; 
-             }
-             if (col === 0) {
-                 // "Mouths": Low index types (1-3) attract nutrients for growth/metabolism
-                 // This causes organisms to orient towards food
-                 if (row <= 3) return 0.5; 
-                 return 0.0; 
-             }
-
-             const dist = col - row;
-             const absDist = Math.abs(dist);
-
-             // --- 2. Self-Cohesion (Tissue Integrity) ---
-             if (absDist === 0) {
-                 // Higher index types (Skin/Shell) are tougher (higher cohesion)
-                 // Lower index types (Organs) are softer
-                 return 0.6 + (row / num) * 0.4; 
-             }
-
-             // --- 3. Polymer Chain (Skeleton) ---
-             if (absDist === 1) {
-                 // Strong bond with immediate neighbors
-                 // Asymmetry: Pull harder on the next type to create "Head-Tail" directionality
-                 // If col > row (Next), pull strong. If col < row (Prev), pull weak.
-                 return (dist > 0) ? 0.7 : 0.3;
-             }
-
-             // --- 4. Structural Stiffness (Angle limitation) ---
-             if (absDist === 2) {
-                 // Weak repulsion prevents the chain from folding back perfectly on itself
-                 // This creates semi-rigid "bones" or "membranes"
-                 return -0.2;
-             }
-             
-             // --- 5. Complex Distant Interactions ---
-             // Varied attraction/repulsion to encourage folding and non-linear shapes
-             
-             // Secondary Folding: Weak attraction to allow chains to fold back
-             if (absDist === 3) return 0.1;
-
-             // Structural Loops: Connect distant parts to form rings/compartments
-             if (absDist === 5 || absDist === 8) return 0.15;
-
-             // Distant Repulsion Gradient
-             // Very distinct types repel strongly to keep "organs" separate
-             if (absDist > num / 2) return -0.6;
-
-             // Varied background repulsion based on parity
-             // Prevents perfect crystallization, encourages organic fuzziness
-             return (absDist % 2 === 0) ? -0.3 : -0.4;
-         })
-    );
-    
-    setRules(newRules);
-    
-    setParams(p => ({
-        ...p,
-        friction: 0.82, // High friction for stable structures (viscous environment)
-        dt: 0.02,
-        forceFactor: 1.8, // Strong bonding forces
-        rMax: 0.18, // Extended radius to allow complex multi-neighbor interactions
-        minDistance: 0.04, // Distinct particles
-        growth: true, // Enable metabolic cycle
-        temperature: 0.2 // Some thermal noise to vibrate structures into place
-    }));
-    
-    // Reset to distribute types randomly so they can self-assemble
-    setTimeout(() => engineRef.current?.reset(), 100);
-  }, [colors.length]);
 
   const handleRandomizeRules = useCallback(() => {
     const num = colors.length;

@@ -11,6 +11,27 @@ type GPUTexture = any;
 declare var GPUBufferUsage: any;
 declare var GPUTextureUsage: any;
 
+// Utility to pack float to half-float (f16) for initial CPU upload
+// Returns 16-bit integer representation
+const toHalf = (val: number) => {
+    const floatView = new Float32Array(1);
+    const int32View = new Int32Array(floatView.buffer);
+    floatView[0] = val;
+    const x = int32View[0];
+    const bits = (x >> 16) & 0x8000; /* Get the sign */
+    let m = (x >> 12) & 0x07ff; /* Keep one extra bit for rounding */
+    const e = (x >> 23) & 0xff; /* Using only the exponent */
+    if (e < 103) return bits; /* Check for too small exponent (0) */
+    if (e > 142) { /* Check for too large exponent (infinity) */
+        return bits | 0x7c00;
+    }
+    if (e < 113) { /* Subnormal */
+            m |= 0x0800;
+            return bits | ((m >> (114 - e)) + ((m >> (113 - e)) & 1));
+    }
+    return bits | ((e - 112) << 10) | (m >> 1) + (m & 1);
+};
+
 // WGSL Shaders
 
 const FADE_SHADER = `
@@ -31,19 +52,21 @@ fn fs_main() -> @location(0) vec4f {
 `;
 
 const COMPUTE_SHADER = `
-struct ParticlePos {
-    pos: vec2f,
-    color: f32,
-    pad: f32, // Padding to 16 bytes
-};
+// Packed Structures Optimization:
+//
+// ParticlesA (Hot Loop Buffer - Reduced to 4 bytes):
+//   u32 containing:
+//   - Bits 0-11 : Position X (12-bit quantized 0..4095)
+//   - Bits 12-23: Position Y (12-bit quantized 0..4095)
+//   - Bits 24-31: Type Index (8-bit 0..255)
+//
+// ParticlesB (State Buffer - Expanded to 16 bytes to preserve precision):
+//   vec4u containing:
+//   .x = High Precision Pos (pack2x16float) - Source of truth for integration
+//   .y = Velocity (pack2x16float)
+//   .z = State (Density f16, Age f16)
+//   .w = Padding / Reserved
 
-struct ParticleState {
-    vel: vec2f,
-    density: f32,
-    age: f32,
-};
-
-// Aligned to 16 floats + 4 floats padding = 20 floats (80 bytes)
 struct Params {
     width: f32,
     height: f32,
@@ -67,19 +90,17 @@ struct Params {
     pad2: f32,
 };
 
-// Split buffers for better cache locality in neighbor search
-@group(0) @binding(0) var<storage, read_write> particlesA: array<ParticlePos>;
+@group(0) @binding(0) var<storage, read_write> particlesA: array<u32>;
 @group(0) @binding(1) var rulesTex: texture_2d<f32>; 
 @group(0) @binding(2) var<uniform> params: Params;
-@group(0) @binding(4) var<storage, read_write> particlesB: array<ParticleState>;
+@group(0) @binding(4) var<storage, read_write> particlesB: array<vec4u>;
 
 const BLOCK_SIZE = 256u;
 const MAX_TYPES = 64u; 
 
-var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
-var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
+var<workgroup> tile_a: array<u32, BLOCK_SIZE>; // Cache entire A packet
 
-// Faster hash for inner loops (lower quality but sufficient for variation)
+// Faster hash for inner loops
 fn fast_hash(seed: vec2f) -> f32 {
     return fract(sin(dot(seed, vec2f(12.9898, 78.233))) * 43758.5453);
 }
@@ -95,35 +116,35 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let index = global_id.x;
     let particleCount = u32(params.count);
 
-    // Loop Invariants & Optimization Constants
     let rMax = params.rMax;
     let rMaxSq = rMax * rMax; 
     let rMaxInv = 1.0 / rMax; 
     
-    // "Stiff Core" Physics settings
-    // A smaller safeRMin creates "tighter" lattices
     let rMin = params.minDist; 
     let safeRMin = max(0.001, rMin);
     
     let baseForceFactor = params.forceFactor;
     let growthEnabled = params.growth > 0.5;
     
-    // Seed for biological functions
     let bioSeed = params.time + f32(index) * 0.123;
     let randomVal = fast_hash(vec2f(bioSeed, f32(index)));
     
+    // --- Load Self Data ---
+    // We load high-precision position from B for physics stability
+    // We load Type from A
     var myPos = vec2f(0.0);
-    var myColor = 0.0;
+    var myType = 0u;
     
     if (index < particleCount) {
-        let pA = particlesA[index];
-        myPos = pA.pos;
-        myColor = pA.color;
+        let packedB = particlesB[index];
+        myPos = unpack2x16float(packedB.x);
+        
+        let packedA = particlesA[index];
+        myType = (packedA >> 24u) & 0xFFu;
     }
 
-    let myType = u32(round(myColor));
     var force = vec2f(0.0, 0.0);
-    var newColor = myColor; 
+    var newColor = f32(myType); 
     var localDensity = 0.0; 
     var nearNeighbors = 0.0;
 
@@ -131,7 +152,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var myRules: array<f32, 64>;
     let numTypes = u32(params.numTypes);
     
-    // Load rules into registers
     for (var t = 0u; t < MAX_TYPES; t++) {
         if (t < numTypes) {
              myRules[t] = textureLoad(rulesTex, vec2u(t, myType), 0).r;
@@ -158,14 +178,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         let tile_idx = i + local_id.x;
         
         if (tile_idx < particleCount) {
-            // Memory Optimization: Only load Position and Type (16 bytes)
-            // Skip Velocity and State (saves 50% bandwidth on read)
-            let pA = particlesA[tile_idx];
-            tile_pos[local_id.x] = pA.pos;
-            tile_type[local_id.x] = u32(round(pA.color)); 
+            // Load compressed neighbor data (4 bytes)
+            tile_a[local_id.x] = particlesA[tile_idx];
         } else {
-            tile_pos[local_id.x] = vec2f(-1000.0, -1000.0); // Sentinel
-            tile_type[local_id.x] = 0u;
+            // Sentinel: Position outside range
+            tile_a[local_id.x] = 0xFFFFFFFFu;
         }
 
         workgroupBarrier(); 
@@ -176,55 +193,52 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
             for (var j = 0u; j < BLOCK_SIZE; j++) {
                 if (j >= limit) { break; } 
 
-                let otherPos = tile_pos[j];
+                let packedNeighbor = tile_a[j];
+                
+                // Skip sentinel
+                if (packedNeighbor == 0xFFFFFFFFu) { continue; }
+
+                // Unpack Neighbor (On-the-fly)
+                // x: 0..11, y: 12..23, type: 24..31
+                let nx = f32(packedNeighbor & 0xFFFu);
+                let ny = f32((packedNeighbor >> 12u) & 0xFFFu);
+                let nType = (packedNeighbor >> 24u) & 0xFFu;
+                
+                // Convert 12-bit int 0..4095 to float -1..1
+                let otherPos = vec2f(nx, ny) * (1.0 / 4095.0) * 2.0 - 1.0;
+
                 let rawD = otherPos - myPos;
                 let d = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
                 let d2 = dot(d, d);
 
-                // Early Exit
                 if (d2 > rMaxSq || d2 < 0.000001) {
                     continue;
                 }
 
                 let invDist = inverseSqrt(d2);
-                let dist = d2 * invDist; // = sqrt(d2)
+                let dist = d2 * invDist; 
                 
-                // Density for Crowd Control
                 localDensity += (1.0 - dist * rMaxInv);
 
-                // Metabolic Neighbor Counting (Very close)
                 if (growthEnabled && dist < 0.05) {
                     nearNeighbors += 1.0;
-                    
-                    // Feeding Logic:
-                    // If I am Food (Type 0) and neighbor is Life (Type > 0), I might become Life.
-                    // This creates growth at the edges of organisms.
-                    if (myType == 0u && tile_type[j] > 0u) {
-                        // Growth probability check
-                        if (randomVal < 0.005) {
-                            newColor = f32(tile_type[j]);
-                        }
+                    if (myType == 0u && nType > 0u) {
+                         // Density-dependent growth
+                         if (localDensity < 15.0 && randomVal < 0.01) {
+                             newColor = f32(nType);
+                         }
                     }
                 }
 
                 var f = 0.0;
                 
                 if (dist < safeRMin) {
-                    // STIFF CORE PHYSICS
-                    // Instead of linear repulsion, use a power curve to create "solid" particles
-                    // This prevents particles from merging into a single point, enabling "tissues"
                     let repulse = 1.0 - (dist / safeRMin);
-                    f = -20.0 * repulse * repulse; // Strong exponential repulsion
+                    f = -20.0 * repulse * repulse;
                 } else {
-                    // BONDING PHYSICS
-                    // Use a curve that supports equilibrium at specific distances
                     let q = (dist - safeRMin) / (rMax - safeRMin);
-                    
-                    // Standard envelope: 4 * q * (1-q)
-                    // We modify it to maintain force longer to create "chains"
                     let envelope = 4.0 * q * (1.0 - q);
-                    
-                    f = myRules[tile_type[j]] * envelope;
+                    f = myRules[nType] * envelope;
                 }
                 
                 force += d * (invDist * f * baseForceFactor);
@@ -234,63 +248,72 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     }
 
     if (index < particleCount) {
-        var pA = particlesA[index];
-        var pB = particlesB[index];
+        // Load B state (16 bytes read - OK for once per thread)
+        let packedB = particlesB[index];
+        var vel = unpack2x16float(packedB.y);
+        let state = unpack2x16float(packedB.z);
+        var density = state.x;
+        var age = state.y;
 
-        // --- Metabolic Decay (Apoptosis) ---
-        // If enabled, complex life regulates itself
+        // --- Metabolic Decay ---
         if (growthEnabled && myType > 0u) {
-            // Die if too crowded (Pressure death) OR too lonely (Isolation death)
-            // But only with a small chance to avoid flickering
-            let overCrowded = nearNeighbors > 15.0; 
+            let overCrowded = nearNeighbors > 20.0; 
             let lonely = nearNeighbors < 1.0;
-            
             if ((overCrowded || lonely) && randomVal < 0.02) {
-                newColor = 0.0; // Return to Food
+                newColor = 0.0; 
             }
         }
 
         // --- Physics Dynamics ---
-
-        // Drag/Friction
-        // Organisms act more like they are in a viscous fluid
         let crowding = smoothstep(5.0, 50.0, localDensity);
-        
         var frict = params.friction;
-        // Increase friction in dense areas to stabilize structures (Gel-like)
         frict = mix(frict, frict * 0.5, crowding);
 
-        // --- Temperature/Brownian Motion ---
         if (params.temperature > 0.001) {
              let seed = myPos + vec2f(params.time * 60.0, f32(index) * 0.7123);
              let randDir = rand2(seed); 
              force += randDir * params.temperature;
         }
 
-        // Hard Speed Limit (safety)
         let fLen = length(force);
         let maxForce = 50.0; 
         if (fLen > maxForce) {
             force = (force / fLen) * maxForce;
         }
 
-        pB.vel += force * params.dt;
-        pB.vel *= frict; 
-        pA.pos += pB.vel * params.dt;
-        pA.pos = fract(pA.pos * 0.5 + 0.5) * 2.0 - 1.0;
+        vel += force * params.dt;
+        vel *= frict; 
+        myPos += vel * params.dt;
+        myPos = fract(myPos * 0.5 + 0.5) * 2.0 - 1.0;
         
-        // --- Age & State Tracking ---
-        if (abs(newColor - myColor) < 0.1) {
-            pB.age += params.dt; // Increase Age
-        } else {
-            pB.age = 0.0; // Reset Age on change (Rebirth)
-        }
-        pB.density = localDensity; // Store Density for renderer
+        let typeChanged = abs(newColor - f32(myType)) > 0.1;
 
-        pA.color = newColor; 
+        if (!typeChanged) {
+            age += params.dt;
+        } else {
+            age = 0.0; 
+        }
+        density = localDensity;
+
+        // --- Write Back ---
         
-        particlesA[index] = pA;
-        particlesB[index] = pB;
+        // 1. Pack B (High Precision State)
+        let newPackedB = vec4u(
+            pack2x16float(myPos),      // x: High Prec Pos
+            pack2x16float(vel),        // y: Velocity
+            pack2x16float(vec2f(density, age)), // z: State
+            0u                         // w: Pad
+        );
+        particlesB[index] = newPackedB;
+
+        // 2. Pack A (Low Precision Neighbor Data)
+        // Map -1..1 to 0..1, then scale to 0..4095
+        let normPos = clamp(myPos * 0.5 + 0.5, vec2f(0.0), vec2f(1.0));
+        let uPos = vec2u(normPos * 4095.0);
+        let uType = u32(newColor) & 0xFFu;
+        
+        let newPackedA = uPos.x | (uPos.y << 12u) | (uType << 24u);
+        particlesA[index] = newPackedA;
     }
 }
 `;
@@ -302,18 +325,6 @@ struct VertexOutput {
     @location(1) uv: vec2f,
     @location(2) speed: f32,
     @location(3) extra: vec2f, // x: Density, y: Age
-};
-
-struct ParticlePos {
-    pos: vec2f,
-    color: f32,
-    pad: f32,
-};
-
-struct ParticleState {
-    vel: vec2f,
-    density: f32,
-    age: f32,
 };
 
 struct Params {
@@ -340,41 +351,49 @@ struct Color {
     r: f32, g: f32, b: f32, a: f32
 };
 
-@group(0) @binding(0) var<storage, read> particlesA: array<ParticlePos>;
+@group(0) @binding(0) var<storage, read> particlesA: array<u32>;
 @group(0) @binding(2) var<uniform> params: Params;
 @group(0) @binding(3) var<storage, read> colors: array<Color>;
-@group(0) @binding(4) var<storage, read> particlesB: array<ParticleState>;
+@group(0) @binding(4) var<storage, read> particlesB: array<vec4u>;
 
 @vertex
 fn vs_main(
     @builtin(vertex_index) vIdx: u32,
     @builtin(instance_index) iIdx: u32
 ) -> VertexOutput {
-    let pA = particlesA[iIdx];
-    let pB = particlesB[iIdx];
+    // We use High Precision Pos from B for smooth rendering
+    let packedB = particlesB[iIdx];
+    let pos = unpack2x16float(packedB.x);
+    let vel = unpack2x16float(packedB.y);
+    let state = unpack2x16float(packedB.z);
+    let density = state.x;
+    let age = state.y;
+
+    // We use Type from A
+    let packedA = particlesA[iIdx];
+    let typeIdx = (packedA >> 24u) & 0xFFu;
     
-    // Frustum Culling
-    if (abs(pA.pos.x) > 1.1 || abs(pA.pos.y) > 1.1) {
+    // --- Frustum Culling ---
+    let w = max(1.0, params.width);
+    let maxExtentNDC = (params.size * 10.0 / w) * 2.0; 
+    let cullLimit = 1.0 + maxExtentNDC;
+
+    if (abs(pos.x) > cullLimit || abs(pos.y) > cullLimit) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0); 
         return cullOut;
     }
 
     let maxType = i32(params.numTypes) - 1;
-    let cType = clamp(i32(round(pA.color)), 0, maxType);
+    let cType = clamp(i32(typeIdx), 0, maxType);
     let colorData = colors[cType];
     
-    // Dim "Food" (Type 0)
     var alpha = 1.0;
     if (cType == 0) {
         alpha = 0.3; 
     }
     
-    let age = pB.age;
-    // Growth Effect: Particles grow into existence
-    let growthFactor = min(1.0, age * 2.0); // Full size after 0.5s
-
-    // --- Alpha Culling & Radius Optimization ---
+    let growthFactor = min(1.0, age * 2.0); 
     let maxAlpha = params.opacity * colorData.a * alpha * growthFactor;
     
     if (maxAlpha < 0.01) {
@@ -386,14 +405,11 @@ fn vs_main(
     let cutoff = pow(0.01 / maxAlpha, 0.4);
     let visibleRadius = clamp(1.0 - cutoff, 0.1, 1.0);
 
-    let w = max(1.0, params.width);
     let h = max(1.0, params.height);
     let aspect = w / h;
 
-    // Apply Growth to size
     let quadSize = params.size * 4.0 * growthFactor; 
     let sizeNDC = (quadSize / w) * 2.0;
-    
     let effectiveSizeNDC = sizeNDC * visibleRadius;
 
     if (effectiveSizeNDC < 0.0001) {
@@ -409,11 +425,10 @@ fn vs_main(
     
     let rawOffset = offsets[vIdx];
     
-    // --- Velocity Deformation ---
-    let speed = length(pB.vel);
+    let speed = length(vel);
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
-        dir = pB.vel / speed;
+        dir = vel / speed;
     }
     let perp = vec2f(-dir.y, dir.x);
     
@@ -426,11 +441,11 @@ fn vs_main(
     finalOffset.y *= aspect; 
 
     var output: VertexOutput;
-    output.position = vec4f(pA.pos + finalOffset, 0.5, 1.0);
+    output.position = vec4f(pos + finalOffset, 0.5, 1.0);
     output.uv = rawOffset * visibleRadius;
     output.speed = speed;
     output.color = vec4f(colorData.r, colorData.g, colorData.b, alpha);
-    output.extra = vec2f(pB.density, age); // Pass density and age
+    output.extra = vec2f(density, age);
     
     return output;
 }
@@ -441,34 +456,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let d2 = dot(uv, uv);
     if (d2 > 1.0) { discard; }
 
-    let r = sqrt(d2); // Radius 0..1
+    let r = sqrt(d2); 
     
-    // Data unpacking
     let density = input.extra.x;
     let age = input.extra.y;
     let baseColor = input.color.rgb;
 
-    // --- 1. Distinct Outline (Membrane) ---
-    // A sharp increase in saturation/brightness at the edge (r=0.8 to 1.0)
-    // This helps visually separate touching particles of the same type.
     let edgeWidth = 0.15;
     let edgeStart = 1.0 - edgeWidth;
     let membrane = smoothstep(edgeStart - 0.05, edgeStart, r) * smoothstep(1.0, 0.95, r);
     
-    // --- 2. Inner Body (Cytoplasm) ---
-    // Softer falloff inside
     let body = smoothstep(1.0, 0.2, r);
     
-    // --- 3. Nucleus (Core) ---
-    // Calculate stress from density (0..1)
     let stressFactor = smoothstep(5.0, 40.0, density);
 
-    // Pulse Frequency: Beating becomes faster under stress
-    // Base speed 2.0, increasing significantly with density
     let pulseSpeed = 2.0 + (stressFactor * 8.0);
     let pulsePhase = sin(params.time * pulseSpeed);
     
-    // Pulse Amplitude: Breathing becomes deeper/more intense under stress
     let pulseAmp = 0.05 + (stressFactor * 0.15); 
     
     let nucleusBaseSize = 0.25;
@@ -476,35 +480,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     
     let nucleus = smoothstep(currentNucleusSize + 0.15, currentNucleusSize, r);
 
-    // --- Color Mixing ---
-    
-    // Maturation: Young cells are whiter
     let maturity = smoothstep(0.0, 2.0, age);
     let matureBodyColor = mix(vec3f(0.95), baseColor, 0.6 + 0.4 * maturity);
 
-    // Stress Glow: Nucleus gets hotter/brighter with density
-    // Shifts from White -> Orange -> Reddish based on density
     let stressColor = mix(vec3f(1.0), vec3f(1.0, 0.4, 0.1), stressFactor); 
-    
-    // Nucleus color also pulses slightly in intensity
     let nucleusColor = mix(vec3f(1.0), stressColor, 0.8 + 0.2 * pulsePhase);
 
-    // Combine
-    // Start with body
     var finalColor = matureBodyColor * body * 0.7; 
-    
-    // Add Membrane (Outline) - Distinct color boost
     finalColor += baseColor * membrane * 1.8;
-    
-    // Add Nucleus
     finalColor = mix(finalColor, nucleusColor, nucleus * 0.9);
 
-    // Velocity Highlight (Motion blur effect approximation)
     let speed = min(input.speed, 3.0);
     finalColor += vec3f(0.1) * speed; 
 
-    // Alpha Calculation
-    // Soften the very outer edge for anti-aliasing
     let alpha = params.opacity * input.color.a * smoothstep(1.0, 0.85, r);
     
     if (alpha < 0.01) { discard; }
@@ -524,9 +512,9 @@ export class SimulationEngine {
     
     private computePipeline: GPUComputePipeline | null = null;
     
-    // Buffer A: Position (vec2) + Color (f32) + Pad (f32) -> 16 bytes. Hot Access.
+    // Buffer A: u32 (4 bytes). [Pos 12b | Pos 12b | Type 8b]
     private particleBufferA: GPUBuffer | null = null;
-    // Buffer B: Velocity (vec2) + Density (f32) + Age (f32) -> 16 bytes. Cold Access.
+    // Buffer B: vec4u (16 bytes). [Pos 32b | Vel 32b | State 32b | Pad 32b]
     private particleBufferB: GPUBuffer | null = null;
 
     private paramsBuffer: GPUBuffer | null = null;
@@ -736,21 +724,41 @@ export class SimulationEngine {
         if (!this.device) return;
         const count = this.particleCount;
         
-        const dataA = new Float32Array(count * 4); // pos(2) + color(1) + pad(1)
-        const dataB = new Float32Array(count * 4); // vel(2) + density(1) + age(1)
+        // Buffer A: 4 bytes per particle (u32)
+        // [12-bit X | 12-bit Y | 8-bit Type]
+        const dataA = new Uint32Array(count); 
+        
+        // Buffer B: 16 bytes per particle (vec4u)
+        // [Pos(32b) | Vel(32b) | State(32b) | Pad(32b)]
+        const dataB = new Uint32Array(count * 4); 
         
         for(let i=0; i<count; i++) {
-            // Buffer A: Hot Data
-            dataA[i*4 + 0] = Math.random() * 2 - 1;
-            dataA[i*4 + 1] = Math.random() * 2 - 1;
-            dataA[i*4 + 2] = Math.floor(Math.random() * this.numTypes);
-            dataA[i*4 + 3] = 0; // pad
+            const rx = Math.random() * 2 - 1;
+            const ry = Math.random() * 2 - 1;
+            
+            // A - Quantized
+            const uX = Math.floor((rx * 0.5 + 0.5) * 4095.0);
+            const uY = Math.floor((ry * 0.5 + 0.5) * 4095.0);
+            const type = Math.floor(Math.random() * this.numTypes);
+            
+            dataA[i] = (uX & 0xFFF) | ((uY & 0xFFF) << 12) | ((type & 0xFF) << 24);
 
-            // Buffer B: Cold/State Data
-            dataB[i*4 + 0] = 0; // vel.x
-            dataB[i*4 + 1] = 0; // vel.y
-            dataB[i*4 + 2] = 0; // density
-            dataB[i*4 + 3] = 0; // age
+            // B - High Precision
+            const px = toHalf(rx);
+            const py = toHalf(ry);
+            const packedPos = (py << 16) | px;
+
+            const vx = toHalf(0);
+            const vy = toHalf(0);
+            const packedVel = (vy << 16) | vx;
+            
+            const state = toHalf(0);
+            const packedState = (state << 16) | state; // density=0, age=0
+
+            dataB[i*4 + 0] = packedPos; 
+            dataB[i*4 + 1] = packedVel; 
+            dataB[i*4 + 2] = packedState; 
+            dataB[i*4 + 3] = 0; // Padding
         }
 
         // Buffer A
@@ -759,7 +767,7 @@ export class SimulationEngine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true,
         });
-        new Float32Array(this.particleBufferA.getMappedRange()).set(dataA);
+        new Uint32Array(this.particleBufferA.getMappedRange()).set(dataA);
         this.particleBufferA.unmap();
 
         // Buffer B
@@ -768,7 +776,7 @@ export class SimulationEngine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true,
         });
-        new Float32Array(this.particleBufferB.getMappedRange()).set(dataB);
+        new Uint32Array(this.particleBufferB.getMappedRange()).set(dataB);
         this.particleBufferB.unmap();
     }
 
@@ -993,21 +1001,36 @@ export class SimulationEngine {
         if (!this.device || !this.particleBufferA || !this.particleBufferB) return;
         const count = this.particleCount;
         
-        const dataA = new Float32Array(count * 4);
-        const dataB = new Float32Array(count * 4);
+        const dataA = new Uint32Array(count);
+        const dataB = new Uint32Array(count * 4);
 
         for(let i=0; i<count; i++) {
-            // A
-            dataA[i*4 + 0] = Math.random() * 2 - 1;
-            dataA[i*4 + 1] = Math.random() * 2 - 1;
-            dataA[i*4 + 2] = Math.floor(Math.random() * this.numTypes);
-            dataA[i*4 + 3] = 0;
-
-            // B
-            dataB[i*4 + 0] = 0; 
-            dataB[i*4 + 1] = 0; 
-            dataB[i*4 + 2] = 0; 
-            dataB[i*4 + 3] = 0; 
+             const rx = Math.random() * 2 - 1;
+             const ry = Math.random() * 2 - 1;
+             
+             // A
+             const uX = Math.floor((rx * 0.5 + 0.5) * 4095.0);
+             const uY = Math.floor((ry * 0.5 + 0.5) * 4095.0);
+             const type = Math.floor(Math.random() * this.numTypes);
+             
+             dataA[i] = (uX & 0xFFF) | ((uY & 0xFFF) << 12) | ((type & 0xFF) << 24);
+ 
+             // B
+             const px = toHalf(rx);
+             const py = toHalf(ry);
+             const packedPos = (py << 16) | px;
+ 
+             const vx = toHalf(0);
+             const vy = toHalf(0);
+             const packedVel = (vy << 16) | vx;
+             
+             const state = toHalf(0);
+             const packedState = (state << 16) | state; // density=0, age=0
+ 
+             dataB[i*4 + 0] = packedPos; 
+             dataB[i*4 + 1] = packedVel; 
+             dataB[i*4 + 2] = packedState; 
+             dataB[i*4 + 3] = 0; 
         }
 
         this.device.queue.writeBuffer(this.particleBufferA, 0, dataA);
