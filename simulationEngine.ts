@@ -98,7 +98,10 @@ struct Params {
 const BLOCK_SIZE = 256u;
 const MAX_TYPES = 64u; 
 
-var<workgroup> tile_a: array<u32, BLOCK_SIZE>; // Cache entire A packet
+// Unpacked cache in Shared Memory (~3KB total)
+// Stores fully expanded float positions and int types for fast inner-loop access
+var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
+var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
 
 // Faster hash for inner loops
 fn fast_hash(seed: vec2f) -> f32 {
@@ -178,11 +181,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         let tile_idx = i + local_id.x;
         
         if (tile_idx < particleCount) {
-            // Load compressed neighbor data (4 bytes)
-            tile_a[local_id.x] = particlesA[tile_idx];
+            let packed = particlesA[tile_idx];
+            
+            // UNPACK ONCE during load:
+            // Extract 12-bit positions and 8-bit type
+            let nx = f32(packed & 0xFFFu);
+            let ny = f32((packed >> 12u) & 0xFFFu);
+            let nType = (packed >> 24u) & 0xFFu;
+            
+            // Normalize 0..4095 -> -1..1
+            tile_pos[local_id.x] = vec2f(nx, ny) * (1.0 / 4095.0) * 2.0 - 1.0;
+            tile_type[local_id.x] = nType;
         } else {
-            // Sentinel: Position outside range
-            tile_a[local_id.x] = 0xFFFFFFFFu;
+            // Sentinel: Position far outside range
+            tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
+            tile_type[local_id.x] = 0u;
         }
 
         workgroupBarrier(); 
@@ -193,19 +206,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
             for (var j = 0u; j < BLOCK_SIZE; j++) {
                 if (j >= limit) { break; } 
 
-                let packedNeighbor = tile_a[j];
-                
-                // Skip sentinel
-                if (packedNeighbor == 0xFFFFFFFFu) { continue; }
-
-                // Unpack Neighbor (On-the-fly)
-                // x: 0..11, y: 12..23, type: 24..31
-                let nx = f32(packedNeighbor & 0xFFFu);
-                let ny = f32((packedNeighbor >> 12u) & 0xFFFu);
-                let nType = (packedNeighbor >> 24u) & 0xFFu;
-                
-                // Convert 12-bit int 0..4095 to float -1..1
-                let otherPos = vec2f(nx, ny) * (1.0 / 4095.0) * 2.0 - 1.0;
+                // FAST READ: No bitwise ops or casts in the hot loop
+                let otherPos = tile_pos[j];
+                let nType = tile_type[j];
 
                 let rawD = otherPos - myPos;
                 let d = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
