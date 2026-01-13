@@ -31,13 +31,16 @@ fn fs_main() -> @location(0) vec4f {
 `;
 
 const COMPUTE_SHADER = `
-struct Particle {
+struct ParticlePos {
     pos: vec2f,
-    vel: vec2f,
     color: f32,
-    pad0: f32, // Stored Density / Stress
-    pad1: f32, // Age / Duration in current state
-    pad2: f32,
+    pad: f32, // Padding to 16 bytes
+};
+
+struct ParticleState {
+    vel: vec2f,
+    density: f32,
+    age: f32,
 };
 
 // Aligned to 16 floats + 4 floats padding = 20 floats (80 bytes)
@@ -64,10 +67,11 @@ struct Params {
     pad2: f32,
 };
 
-@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
-// Use Texture for Rules Lookup (r8snorm gives free normalization from -128..127 to -1.0..1.0)
+// Split buffers for better cache locality in neighbor search
+@group(0) @binding(0) var<storage, read_write> particlesA: array<ParticlePos>;
 @group(0) @binding(1) var rulesTex: texture_2d<f32>; 
 @group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read_write> particlesB: array<ParticleState>;
 
 const BLOCK_SIZE = 256u;
 const MAX_TYPES = 64u; 
@@ -112,9 +116,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var myColor = 0.0;
     
     if (index < particleCount) {
-        let p = particles[index];
-        myPos = p.pos;
-        myColor = p.color;
+        let pA = particlesA[index];
+        myPos = pA.pos;
+        myColor = pA.color;
     }
 
     let myType = u32(round(myColor));
@@ -154,9 +158,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         let tile_idx = i + local_id.x;
         
         if (tile_idx < particleCount) {
-            let p = particles[tile_idx];
-            tile_pos[local_id.x] = p.pos;
-            tile_type[local_id.x] = u32(round(p.color)); 
+            // Memory Optimization: Only load Position and Type (16 bytes)
+            // Skip Velocity and State (saves 50% bandwidth on read)
+            let pA = particlesA[tile_idx];
+            tile_pos[local_id.x] = pA.pos;
+            tile_type[local_id.x] = u32(round(pA.color)); 
         } else {
             tile_pos[local_id.x] = vec2f(-1000.0, -1000.0); // Sentinel
             tile_type[local_id.x] = 0u;
@@ -228,8 +234,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     }
 
     if (index < particleCount) {
-        var p = particles[index]; 
-        let speed = length(p.vel);
+        var pA = particlesA[index];
+        var pB = particlesB[index];
 
         // --- Metabolic Decay (Apoptosis) ---
         // If enabled, complex life regulates itself
@@ -268,21 +274,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
             force = (force / fLen) * maxForce;
         }
 
-        p.vel += force * params.dt;
-        p.vel *= frict; 
-        p.pos += p.vel * params.dt;
-        p.pos = fract(p.pos * 0.5 + 0.5) * 2.0 - 1.0;
+        pB.vel += force * params.dt;
+        pB.vel *= frict; 
+        pA.pos += pB.vel * params.dt;
+        pA.pos = fract(pA.pos * 0.5 + 0.5) * 2.0 - 1.0;
         
         // --- Age & State Tracking ---
         if (abs(newColor - myColor) < 0.1) {
-            p.pad1 += params.dt; // Increase Age
+            pB.age += params.dt; // Increase Age
         } else {
-            p.pad1 = 0.0; // Reset Age on change (Rebirth)
+            pB.age = 0.0; // Reset Age on change (Rebirth)
         }
-        p.pad0 = localDensity; // Store Density for renderer
+        pB.density = localDensity; // Store Density for renderer
 
-        p.color = newColor; 
-        particles[index] = p;
+        pA.color = newColor; 
+        
+        particlesA[index] = pA;
+        particlesB[index] = pB;
     }
 }
 `;
@@ -296,13 +304,16 @@ struct VertexOutput {
     @location(3) extra: vec2f, // x: Density, y: Age
 };
 
-struct Particle {
+struct ParticlePos {
     pos: vec2f,
-    vel: vec2f,
     color: f32,
-    pad0: f32,
-    pad1: f32,
-    pad2: f32,
+    pad: f32,
+};
+
+struct ParticleState {
+    vel: vec2f,
+    density: f32,
+    age: f32,
 };
 
 struct Params {
@@ -329,26 +340,28 @@ struct Color {
     r: f32, g: f32, b: f32, a: f32
 };
 
-@group(0) @binding(0) var<storage, read> particles: array<Particle>;
+@group(0) @binding(0) var<storage, read> particlesA: array<ParticlePos>;
 @group(0) @binding(2) var<uniform> params: Params;
 @group(0) @binding(3) var<storage, read> colors: array<Color>;
+@group(0) @binding(4) var<storage, read> particlesB: array<ParticleState>;
 
 @vertex
 fn vs_main(
     @builtin(vertex_index) vIdx: u32,
     @builtin(instance_index) iIdx: u32
 ) -> VertexOutput {
-    let p = particles[iIdx];
+    let pA = particlesA[iIdx];
+    let pB = particlesB[iIdx];
     
     // Frustum Culling
-    if (abs(p.pos.x) > 1.1 || abs(p.pos.y) > 1.1) {
+    if (abs(pA.pos.x) > 1.1 || abs(pA.pos.y) > 1.1) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0); 
         return cullOut;
     }
 
     let maxType = i32(params.numTypes) - 1;
-    let cType = clamp(i32(round(p.color)), 0, maxType);
+    let cType = clamp(i32(round(pA.color)), 0, maxType);
     let colorData = colors[cType];
     
     // Dim "Food" (Type 0)
@@ -357,7 +370,7 @@ fn vs_main(
         alpha = 0.3; 
     }
     
-    let age = p.pad1;
+    let age = pB.age;
     // Growth Effect: Particles grow into existence
     let growthFactor = min(1.0, age * 2.0); // Full size after 0.5s
 
@@ -397,10 +410,10 @@ fn vs_main(
     let rawOffset = offsets[vIdx];
     
     // --- Velocity Deformation ---
-    let speed = length(p.vel);
+    let speed = length(pB.vel);
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
-        dir = p.vel / speed;
+        dir = pB.vel / speed;
     }
     let perp = vec2f(-dir.y, dir.x);
     
@@ -413,11 +426,11 @@ fn vs_main(
     finalOffset.y *= aspect; 
 
     var output: VertexOutput;
-    output.position = vec4f(p.pos + finalOffset, 0.5, 1.0);
+    output.position = vec4f(pA.pos + finalOffset, 0.5, 1.0);
     output.uv = rawOffset * visibleRadius;
     output.speed = speed;
     output.color = vec4f(colorData.r, colorData.g, colorData.b, alpha);
-    output.extra = vec2f(p.pad0, age); // Pass density and age
+    output.extra = vec2f(pB.density, age); // Pass density and age
     
     return output;
 }
@@ -447,35 +460,48 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let body = smoothstep(1.0, 0.2, r);
     
     // --- 3. Nucleus (Core) ---
-    // Pulsing core based on density (stress)
-    let pulseSpeed = 3.0 + density * 0.1;
-    let pulseVal = sin(params.time * pulseSpeed) * 0.5 + 0.5;
-    let nucleusSize = 0.25 + 0.05 * pulseVal;
-    let nucleus = smoothstep(nucleusSize + 0.1, nucleusSize, r);
+    // Calculate stress from density (0..1)
+    let stressFactor = smoothstep(5.0, 40.0, density);
+
+    // Pulse Frequency: Beating becomes faster under stress
+    // Base speed 2.0, increasing significantly with density
+    let pulseSpeed = 2.0 + (stressFactor * 8.0);
+    let pulsePhase = sin(params.time * pulseSpeed);
+    
+    // Pulse Amplitude: Breathing becomes deeper/more intense under stress
+    let pulseAmp = 0.05 + (stressFactor * 0.15); 
+    
+    let nucleusBaseSize = 0.25;
+    let currentNucleusSize = nucleusBaseSize + (pulsePhase * pulseAmp);
+    
+    let nucleus = smoothstep(currentNucleusSize + 0.15, currentNucleusSize, r);
 
     // --- Color Mixing ---
     
     // Maturation: Young cells are whiter
     let maturity = smoothstep(0.0, 2.0, age);
-    let bodyColor = mix(vec3f(0.9), baseColor, 0.5 + 0.5 * maturity);
+    let matureBodyColor = mix(vec3f(0.95), baseColor, 0.6 + 0.4 * maturity);
 
-    // Stress Glow: High density makes the nucleus glow hot
-    let stress = smoothstep(10.0, 50.0, density);
-    let nucleusColor = mix(vec3f(1.0), vec3f(1.0, 0.5, 0.2), stress);
+    // Stress Glow: Nucleus gets hotter/brighter with density
+    // Shifts from White -> Orange -> Reddish based on density
+    let stressColor = mix(vec3f(1.0), vec3f(1.0, 0.4, 0.1), stressFactor); 
+    
+    // Nucleus color also pulses slightly in intensity
+    let nucleusColor = mix(vec3f(1.0), stressColor, 0.8 + 0.2 * pulsePhase);
 
     // Combine
     // Start with body
-    var finalColor = bodyColor * body * 0.8; 
+    var finalColor = matureBodyColor * body * 0.7; 
     
     // Add Membrane (Outline) - Distinct color boost
-    finalColor += baseColor * membrane * 1.5;
+    finalColor += baseColor * membrane * 1.8;
     
     // Add Nucleus
-    finalColor = mix(finalColor, nucleusColor, nucleus * 0.8);
+    finalColor = mix(finalColor, nucleusColor, nucleus * 0.9);
 
-    // Velocity Highlight
-    let speed = min(input.speed, 2.0);
-    finalColor *= (1.0 + speed * 0.5);
+    // Velocity Highlight (Motion blur effect approximation)
+    let speed = min(input.speed, 3.0);
+    finalColor += vec3f(0.1) * speed; 
 
     // Alpha Calculation
     // Soften the very outer edge for anti-aliasing
@@ -498,7 +524,11 @@ export class SimulationEngine {
     
     private computePipeline: GPUComputePipeline | null = null;
     
-    private particleBuffer: GPUBuffer | null = null;
+    // Buffer A: Position (vec2) + Color (f32) + Pad (f32) -> 16 bytes. Hot Access.
+    private particleBufferA: GPUBuffer | null = null;
+    // Buffer B: Velocity (vec2) + Density (f32) + Age (f32) -> 16 bytes. Cold Access.
+    private particleBufferB: GPUBuffer | null = null;
+
     private paramsBuffer: GPUBuffer | null = null;
     private rulesTexture: GPUTexture | null = null;
     private colorBuffer: GPUBuffer | null = null;
@@ -587,7 +617,7 @@ export class SimulationEngine {
 
         this.resize(this.canvas.clientWidth || window.innerWidth, this.canvas.clientHeight || window.innerHeight);
 
-        this.createParticleBuffer();
+        this.createParticleBuffers();
         this.createRulesTexture(rules);
         this.createParamsBuffer(params);
         this.createColorBuffer(colors);
@@ -692,26 +722,54 @@ export class SimulationEngine {
             this.rulesTexture.destroy();
             this.rulesTexture = null;
         }
+        if (this.particleBufferA) {
+            this.particleBufferA.destroy();
+            this.particleBufferA = null;
+        }
+        if (this.particleBufferB) {
+            this.particleBufferB.destroy();
+            this.particleBufferB = null;
+        }
     }
 
-    private createParticleBuffer() {
+    private createParticleBuffers() {
         if (!this.device) return;
         const count = this.particleCount;
-        const data = new Float32Array(count * 8); 
+        
+        const dataA = new Float32Array(count * 4); // pos(2) + color(1) + pad(1)
+        const dataB = new Float32Array(count * 4); // vel(2) + density(1) + age(1)
+        
         for(let i=0; i<count; i++) {
-            data[i*8 + 0] = Math.random() * 2 - 1;
-            data[i*8 + 1] = Math.random() * 2 - 1;
-            data[i*8 + 2] = 0;
-            data[i*8 + 3] = 0;
-            data[i*8 + 4] = Math.floor(Math.random() * this.numTypes);
+            // Buffer A: Hot Data
+            dataA[i*4 + 0] = Math.random() * 2 - 1;
+            dataA[i*4 + 1] = Math.random() * 2 - 1;
+            dataA[i*4 + 2] = Math.floor(Math.random() * this.numTypes);
+            dataA[i*4 + 3] = 0; // pad
+
+            // Buffer B: Cold/State Data
+            dataB[i*4 + 0] = 0; // vel.x
+            dataB[i*4 + 1] = 0; // vel.y
+            dataB[i*4 + 2] = 0; // density
+            dataB[i*4 + 3] = 0; // age
         }
-        this.particleBuffer = this.device.createBuffer({
-            size: data.byteLength,
+
+        // Buffer A
+        this.particleBufferA = this.device.createBuffer({
+            size: dataA.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true,
         });
-        new Float32Array(this.particleBuffer.getMappedRange()).set(data);
-        this.particleBuffer.unmap();
+        new Float32Array(this.particleBufferA.getMappedRange()).set(dataA);
+        this.particleBufferA.unmap();
+
+        // Buffer B
+        this.particleBufferB = this.device.createBuffer({
+            size: dataB.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true,
+        });
+        new Float32Array(this.particleBufferB.getMappedRange()).set(dataB);
+        this.particleBufferB.unmap();
     }
 
     private createRulesTexture(rules: RuleMatrix) {
@@ -811,21 +869,23 @@ export class SimulationEngine {
     }
 
     private updateBindGroups() {
-        if (!this.device || !this.computePipeline || !this.pipelineAdditive || !this.particleBuffer || !this.rulesTexture) return;
+        if (!this.device || !this.computePipeline || !this.pipelineAdditive || !this.particleBufferA || !this.particleBufferB || !this.rulesTexture) return;
 
         this.computeBindGroup = this.device.createBindGroup({
             layout: this.computePipeline.getBindGroupLayout(0),
             entries: [
-                { binding: 0, resource: { buffer: this.particleBuffer } },
+                { binding: 0, resource: { buffer: this.particleBufferA } },
                 { binding: 1, resource: this.rulesTexture.createView() },
                 { binding: 2, resource: { buffer: this.paramsBuffer } },
+                { binding: 4, resource: { buffer: this.particleBufferB } },
             ],
         });
 
         const renderEntries = [
-            { binding: 0, resource: { buffer: this.particleBuffer } },
+            { binding: 0, resource: { buffer: this.particleBufferA } },
             { binding: 2, resource: { buffer: this.paramsBuffer } },
             { binding: 3, resource: { buffer: this.colorBuffer } },
+            { binding: 4, resource: { buffer: this.particleBufferB } },
         ];
 
         this.renderBindGroupAdditive = this.device.createBindGroup({
@@ -851,7 +911,7 @@ export class SimulationEngine {
         let needsBindGroupUpdate = false;
         if (params.particleCount !== this.particleCount) {
              this.particleCount = params.particleCount;
-             this.createParticleBuffer();
+             this.createParticleBuffers();
              needsBindGroupUpdate = true;
         }
 
@@ -930,17 +990,28 @@ export class SimulationEngine {
     }
 
     public reset() {
-        if (!this.device || !this.particleBuffer) return;
+        if (!this.device || !this.particleBufferA || !this.particleBufferB) return;
         const count = this.particleCount;
-        const data = new Float32Array(count * 8);
+        
+        const dataA = new Float32Array(count * 4);
+        const dataB = new Float32Array(count * 4);
+
         for(let i=0; i<count; i++) {
-            data[i*8 + 0] = Math.random() * 2 - 1;
-            data[i*8 + 1] = Math.random() * 2 - 1;
-            data[i*8 + 2] = 0;
-            data[i*8 + 3] = 0;
-            data[i*8 + 4] = Math.floor(Math.random() * this.numTypes);
+            // A
+            dataA[i*4 + 0] = Math.random() * 2 - 1;
+            dataA[i*4 + 1] = Math.random() * 2 - 1;
+            dataA[i*4 + 2] = Math.floor(Math.random() * this.numTypes);
+            dataA[i*4 + 3] = 0;
+
+            // B
+            dataB[i*4 + 0] = 0; 
+            dataB[i*4 + 1] = 0; 
+            dataB[i*4 + 2] = 0; 
+            dataB[i*4 + 3] = 0; 
         }
-        this.device.queue.writeBuffer(this.particleBuffer, 0, data);
+
+        this.device.queue.writeBuffer(this.particleBufferA, 0, dataA);
+        this.device.queue.writeBuffer(this.particleBufferB, 0, dataB);
         this.textureNeedsClear = true;
     }
 
