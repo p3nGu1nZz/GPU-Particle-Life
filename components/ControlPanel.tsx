@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import { SimulationParams, RuleMatrix, ColorDefinition, GPUPreference, SavedConfiguration } from '../types';
-import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid, Download, Upload, Minimize2, Maximize2, DnaOff } from 'lucide-react';
+import { Settings, Play, Pause, RotateCcw, RefreshCw, X, Rocket, Monitor, Maximize, Blend, Plus, Minus, Palette, Dna, Sprout, MousePointer2, ChevronDown, ChevronUp, Zap, Grid, Download, Upload, Minimize2, Maximize2, DnaOff, Info } from 'lucide-react';
 
 interface ControlPanelProps {
     params: SimulationParams;
@@ -439,24 +439,28 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                                 value={params.temperature}
                                 min={0.0} max={10.0} step={0.1}
                                 onChange={(v) => updateParam('temperature', v)}
+                                tooltip="Adds random thermal noise to particle movement. Higher values simulate heat, causing structures to vibrate or break apart."
                             />
                             <InputSlider 
                                 label="Friction"
                                 value={params.friction}
                                 min={0.5} max={0.99} step={0.01}
                                 onChange={(v) => updateParam('friction', v)}
+                                tooltip="Resistance to motion. Higher values (near 1.0) make the medium 'thicker', stabilizing complex organisms. Lower values make it slippery."
                             />
                             <InputSlider 
                                 label="Force Strength"
                                 value={params.forceFactor}
                                 min={0.1} max={5.0} step={0.1}
                                 onChange={(v) => updateParam('forceFactor', v)}
+                                tooltip="Global multiplier for attraction/repulsion forces. Stronger forces create rigid, snappy bonds; weaker forces create soft, ghostly interactions."
                             />
                             <InputSlider 
                                 label="Interaction Radius"
                                 value={params.rMax}
                                 min={0.05} max={0.5} step={0.01}
                                 onChange={(v) => updateParam('rMax', v)}
+                                tooltip="Maximum distance particles affect each other. Smaller radius allows for high-resolution, dense tissues. Larger radius creates sparse, web-like structures."
                             />
                         </div>
                     </CollapsibleSection>
@@ -636,10 +640,12 @@ const InputSlider: React.FC<{
     onChange: (val: number) => void;
     integer?: boolean;
     formatValue?: (val: number) => string;
-}> = memo(({ label, value, min, max, step, onChange, integer, formatValue }) => {
+    tooltip?: string;
+}> = memo(({ label, value, min, max, step, onChange, integer, formatValue, tooltip }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [tempValue, setTempValue] = useState(value.toString());
     const inputRef = useRef<HTMLInputElement>(null);
+    const [showTooltip, setShowTooltip] = useState(false);
 
     useEffect(() => {
         if (!isEditing) setTempValue(value.toString());
@@ -661,9 +667,22 @@ const InputSlider: React.FC<{
     const displayValue = formatValue ? formatValue(value) : (integer ? value : value.toFixed(2));
 
     return (
-        <div className="space-y-2">
+        <div className="space-y-2 relative group">
+            {tooltip && (
+                <div className={`absolute bottom-full left-0 mb-2 w-full p-2 bg-neutral-900/95 backdrop-blur border border-emerald-500/30 text-emerald-100 text-[10px] leading-relaxed rounded shadow-xl z-50 pointer-events-none transition-opacity duration-200 ${showTooltip ? 'opacity-100' : 'opacity-0'}`}>
+                    {tooltip}
+                    <div className="absolute -bottom-1 left-4 w-2 h-2 bg-neutral-900 border-r border-b border-emerald-500/30 transform rotate-45"></div>
+                </div>
+            )}
             <div className="flex justify-between text-xs items-center">
-                <span className="text-neutral-300 font-medium">{label}</span>
+                <div 
+                    className="flex items-center space-x-1 cursor-help"
+                    onMouseEnter={() => setShowTooltip(true)}
+                    onMouseLeave={() => setShowTooltip(false)}
+                >
+                    <span className={`font-medium transition-colors ${showTooltip ? 'text-emerald-400' : 'text-neutral-300'}`}>{label}</span>
+                    {tooltip && <div className={`w-1 h-1 rounded-full transition-colors ${showTooltip ? 'bg-emerald-400' : 'bg-neutral-600'}`}></div>}
+                </div>
                 {isEditing ? (
                     <input
                         ref={inputRef}

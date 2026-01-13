@@ -35,8 +35,8 @@ struct Particle {
     pos: vec2f,
     vel: vec2f,
     color: f32,
-    pad0: f32, // Used for "Stress" tracking
-    pad1: f32,
+    pad0: f32, // Stored Density / Stress
+    pad1: f32, // Age / Duration in current state
     pad2: f32,
 };
 
@@ -273,6 +273,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         p.pos += p.vel * params.dt;
         p.pos = fract(p.pos * 0.5 + 0.5) * 2.0 - 1.0;
         
+        // --- Age & State Tracking ---
+        if (abs(newColor - myColor) < 0.1) {
+            p.pad1 += params.dt; // Increase Age
+        } else {
+            p.pad1 = 0.0; // Reset Age on change (Rebirth)
+        }
+        p.pad0 = localDensity; // Store Density for renderer
+
         p.color = newColor; 
         particles[index] = p;
     }
@@ -285,6 +293,7 @@ struct VertexOutput {
     @location(0) color: vec4f,
     @location(1) uv: vec2f,
     @location(2) speed: f32,
+    @location(3) extra: vec2f, // x: Density, y: Age
 };
 
 struct Particle {
@@ -331,11 +340,10 @@ fn vs_main(
 ) -> VertexOutput {
     let p = particles[iIdx];
     
-    // Frustum Culling (Simple Box)
-    // Particles outside [-1.1, 1.1] range are definitely off-screen
+    // Frustum Culling
     if (abs(p.pos.x) > 1.1 || abs(p.pos.y) > 1.1) {
         var cullOut: VertexOutput;
-        cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0); // Move off-clip
+        cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0); 
         return cullOut;
     }
 
@@ -349,34 +357,30 @@ fn vs_main(
         alpha = 0.3; 
     }
     
+    let age = p.pad1;
+    // Growth Effect: Particles grow into existence
+    let growthFactor = min(1.0, age * 2.0); // Full size after 0.5s
+
     // --- Alpha Culling & Radius Optimization ---
-    let maxAlpha = params.opacity * colorData.a * alpha;
+    let maxAlpha = params.opacity * colorData.a * alpha * growthFactor;
     
-    // 1. Cull Invisible
     if (maxAlpha < 0.01) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
         return cullOut;
     }
 
-    // 2. Shrink Quad to Visible Radius
-    // The fragment shader discards if alpha < 0.01.
-    // alpha ~= (1-dist)^2.5 * maxAlpha.
-    // We solve for dist where alpha == 0.01.
-    // dist = 1.0 - (0.01 / maxAlpha)^(1/2.5)
     let cutoff = pow(0.01 / maxAlpha, 0.4);
-    // Safety clamp to ensure we don't invert or make it too small to see
     let visibleRadius = clamp(1.0 - cutoff, 0.1, 1.0);
 
     let w = max(1.0, params.width);
     let h = max(1.0, params.height);
     let aspect = w / h;
 
-    // Soft Particle Geometry
-    let quadSize = params.size * 4.0; 
+    // Apply Growth to size
+    let quadSize = params.size * 4.0 * growthFactor; 
     let sizeNDC = (quadSize / w) * 2.0;
     
-    // Apply Optimization: Scale geometry by visible radius
     let effectiveSizeNDC = sizeNDC * visibleRadius;
 
     if (effectiveSizeNDC < 0.0001) {
@@ -392,7 +396,7 @@ fn vs_main(
     
     let rawOffset = offsets[vIdx];
     
-    // --- Velocity Deformation (Squash & Stretch) ---
+    // --- Velocity Deformation ---
     let speed = length(p.vel);
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
@@ -409,41 +413,77 @@ fn vs_main(
     finalOffset.y *= aspect; 
 
     var output: VertexOutput;
-    // Z = 0.5 (Mid-depth)
     output.position = vec4f(p.pos + finalOffset, 0.5, 1.0);
-    // UVs are scaled to match the physical shrink, preserving the gradient logic
     output.uv = rawOffset * visibleRadius;
     output.speed = speed;
-    
     output.color = vec4f(colorData.r, colorData.g, colorData.b, alpha);
+    output.extra = vec2f(p.pad0, age); // Pass density and age
     
     return output;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-    let d2 = dot(input.uv, input.uv); 
-    
-    // Discard corners of the circle
-    if (d2 > 1.0) {
-        discard;
-    }
+    let uv = input.uv;
+    let d2 = dot(uv, uv);
+    if (d2 > 1.0) { discard; }
 
-    let dist = sqrt(d2);
-    let falloff = 1.0 - dist;
+    let r = sqrt(d2); // Radius 0..1
     
-    let halo = pow(falloff, 2.5);
-    let core = smoothstep(0.7, 1.0, falloff);
-    let energyGlow = 1.0 + min(input.speed * 2.0, 1.0);
+    // Data unpacking
+    let density = input.extra.x;
+    let age = input.extra.y;
+    let baseColor = input.color.rgb;
+
+    // --- 1. Distinct Outline (Membrane) ---
+    // A sharp increase in saturation/brightness at the edge (r=0.8 to 1.0)
+    // This helps visually separate touching particles of the same type.
+    let edgeWidth = 0.15;
+    let edgeStart = 1.0 - edgeWidth;
+    let membrane = smoothstep(edgeStart - 0.05, edgeStart, r) * smoothstep(1.0, 0.95, r);
     
-    let alphaShape = halo * params.opacity * input.color.a;
-    let finalColor = mix(input.color.rgb, vec3f(1.0), core * 0.6) * energyGlow;
+    // --- 2. Inner Body (Cytoplasm) ---
+    // Softer falloff inside
+    let body = smoothstep(1.0, 0.2, r);
+    
+    // --- 3. Nucleus (Core) ---
+    // Pulsing core based on density (stress)
+    let pulseSpeed = 3.0 + density * 0.1;
+    let pulseVal = sin(params.time * pulseSpeed) * 0.5 + 0.5;
+    let nucleusSize = 0.25 + 0.05 * pulseVal;
+    let nucleus = smoothstep(nucleusSize + 0.1, nucleusSize, r);
 
-    if (alphaShape < 0.01) {
-        discard;
-    }
+    // --- Color Mixing ---
+    
+    // Maturation: Young cells are whiter
+    let maturity = smoothstep(0.0, 2.0, age);
+    let bodyColor = mix(vec3f(0.9), baseColor, 0.5 + 0.5 * maturity);
 
-    return vec4f(finalColor * alphaShape, alphaShape);
+    // Stress Glow: High density makes the nucleus glow hot
+    let stress = smoothstep(10.0, 50.0, density);
+    let nucleusColor = mix(vec3f(1.0), vec3f(1.0, 0.5, 0.2), stress);
+
+    // Combine
+    // Start with body
+    var finalColor = bodyColor * body * 0.8; 
+    
+    // Add Membrane (Outline) - Distinct color boost
+    finalColor += baseColor * membrane * 1.5;
+    
+    // Add Nucleus
+    finalColor = mix(finalColor, nucleusColor, nucleus * 0.8);
+
+    // Velocity Highlight
+    let speed = min(input.speed, 2.0);
+    finalColor *= (1.0 + speed * 0.5);
+
+    // Alpha Calculation
+    // Soften the very outer edge for anti-aliasing
+    let alpha = params.opacity * input.color.a * smoothstep(1.0, 0.85, r);
+    
+    if (alpha < 0.01) { discard; }
+
+    return vec4f(finalColor * alpha, alpha);
 }
 `;
 
