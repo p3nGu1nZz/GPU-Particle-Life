@@ -131,106 +131,110 @@ const App: React.FC = () => {
   // --- Advanced Organism Generation ---
   const handleGenerateOrganisms = useCallback(() => {
     const num = colors.length;
-    const strategy = Math.random();
+    // 5 Distinct Strategies
+    const strategy = Math.floor(Math.random() * 5);
+    
     let newRules: number[][] = [];
     let newParams: Partial<SimulationParams> = {};
 
-    if (strategy < 0.33) {
-        // Strategy 1: Complex Polymers & Snakes
-        // Focus: Gradient attraction (i -> i+1) to form chains, with structural stiffness (i -/> i+2)
-        newRules = Array(num).fill(0).map((_, row) => 
-            Array(num).fill(0).map((_, col) => {
-                const dist = col - row;
-                const absDist = Math.abs(dist);
-                
-                // Self: Mild attraction for cohesion
-                if (row === col) return 0.2; 
-                
-                // Chain Formation: Strong pull to next index, neutral to previous (directional)
-                if (dist === 1 || dist === -(num-1)) return 0.7; 
-                if (dist === -1 || dist === (num-1)) return 0.0;
-                
-                // Stiffness: Repel 2nd neighbor to prevent collapsing into a point
-                if (absDist === 2) return -0.4; 
-                
-                // Background: Mild repulsion to keep separate chains distinct
-                return -0.1;
-            })
-        );
-        newParams = {
-            friction: 0.9,
-            dt: 0.02,
-            forceFactor: 1.5,
-            rMax: 0.18,
-            minDistance: 0.05,
-            growth: true, // Allow chains to grow
-            temperature: 0.1 // Some heat to wiggle chains
-        };
-        console.log("Generated: Polymers");
+    switch (strategy) {
+        case 0: // Complex Polymers (Chains)
+            // Focus: Gradient attraction (i -> i+1) to form chains
+            newRules = Array(num).fill(0).map((_, row) => 
+                Array(num).fill(0).map((_, col) => {
+                    const diff = col - row;
+                    // Self: mild attraction
+                    if (row === col) return 0.2;
+                    // Next: strong pull
+                    if (diff === 1 || diff === -(num-1)) return 0.8;
+                    // Previous: slight push (asymmetry creates movement)
+                    if (diff === -1 || diff === (num-1)) return -0.2;
+                    // Others: background repulsion
+                    return -0.1;
+                })
+            );
+            newParams = {
+                friction: 0.92, dt: 0.02, forceFactor: 1.5, rMax: 0.2, minDistance: 0.05,
+                growth: true, temperature: 0.1
+            };
+            console.log("Generated: Polymers");
+            break;
 
-    } else if (strategy < 0.66) {
-        // Strategy 2: Cyclic Swarms (Rock-Paper-Scissors)
-        // Focus: Chaotic chasing fronts. A eats B, B eats C.
-        newRules = Array(num).fill(0).map((_, row) => 
-            Array(num).fill(0).map((_, col) => {
-                // Calculate cyclic distance
-                const dist = (col - row + num) % num;
-                
-                // Self: Strong repulsion to spread out (gas-like)
-                if (dist === 0) return -0.4;
-                
-                // Prey: Attract to things 'ahead' in the cycle
-                if (dist > 0 && dist <= num / 3) return 0.5;
-                
-                // Predator: Repel from things 'behind' in the cycle
-                if (dist > (2 * num) / 3) return -0.8;
-                
-                return -0.05;
-            })
-        );
-        newParams = {
-            friction: 0.82, // Lower friction for fluid motion
-            dt: 0.025,
-            forceFactor: 1.2,
-            rMax: 0.22,
-            minDistance: 0.03,
-            growth: false, // Growth interferes with pure cyclic dynamics
-            temperature: 0.0 // Deterministic chaos is preferred here
-        };
-        console.log("Generated: Cyclic Swarms");
+        case 1: // Cyclic Swarms (Rock-Paper-Scissors)
+            // A beats B, B beats C...
+            newRules = Array(num).fill(0).map((_, row) => 
+                Array(num).fill(0).map((_, col) => {
+                    const dist = (col - row + num) % num;
+                    if (dist === 0) return -0.5; // Self repel (expand)
+                    if (dist <= num/3) return 1.0; // Chase forward
+                    if (dist >= (2*num)/3) return -0.8; // Run from behind
+                    return 0;
+                })
+            );
+            newParams = {
+                friction: 0.85, dt: 0.02, forceFactor: 1.0, rMax: 0.25, minDistance: 0.02,
+                growth: false, temperature: 0.0
+            };
+            console.log("Generated: Cyclic Swarms");
+            break;
 
-    } else {
-        // Strategy 3: Tissue Lattices & Membranes
-        // Focus: High self-cohesion with specific cross-links to form multi-cellular structures
-        newRules = Array(num).fill(0).map((_, row) => 
-            Array(num).fill(0).map((_, col) => {
-                if (row === col) return 0.8; // Strong self-cohesion
-                return -0.25; // Default strong background repulsion (immiscible fluids)
-            })
-        );
-        
-        // Add random specific "binding sites" (disulfide bonds)
-        const numBonds = Math.floor(num * 1.5);
-        for(let i=0; i<numBonds; i++) {
-            const r = Math.floor(Math.random() * num);
-            const c = Math.floor(Math.random() * num);
-            if (r !== c) {
-                const strength = 0.4 + Math.random() * 0.6;
-                newRules[r][c] = strength;
-                newRules[c][r] = strength; // Symmetric
+        case 2: // Tissue Lattices (Clusters)
+            // High cohesion within same type, specific bonds between others
+            newRules = Array(num).fill(0).map((_, row) => 
+                Array(num).fill(0).map((_, col) => {
+                    if (row === col) return 0.8; // Cohesion
+                    // Random specific bonds
+                    if (Math.random() > 0.7) return 0.5;
+                    // Otherwise immiscible (oil/water)
+                    return -0.5;
+                })
+            );
+            // Symmetrize to create stable bonds
+            for(let i=0; i<num; i++) {
+                for(let j=i+1; j<num; j++) {
+                    newRules[j][i] = newRules[i][j];
+                }
             }
-        }
-        
-        newParams = {
-            friction: 0.95, // High friction for rigid structures
-            dt: 0.015, // Smaller time step for stability
-            forceFactor: 3.0, // Strong forces
-            rMax: 0.3, // Large radius for cellular interaction
-            minDistance: 0.06,
-            growth: true,
-            temperature: 0.05
-        };
-        console.log("Generated: Tissue Lattices");
+            newParams = {
+                friction: 0.96, dt: 0.015, forceFactor: 3.0, rMax: 0.3, minDistance: 0.08,
+                growth: true, temperature: 0.05
+            };
+            console.log("Generated: Tissue Lattices");
+            break;
+
+        case 3: // Reaction-Diffusion (Turing Patterns)
+             // Symmetric random rules creating foam-like structures
+             newRules = Array(num).fill(0).map(() => 
+                 Array(num).fill(0).map(() => (Math.random() * 2 - 1))
+             );
+             // Symmetrize
+             for(let i=0; i<num; i++) {
+                 for(let j=i+1; j<num; j++) {
+                     newRules[j][i] = newRules[i][j];
+                 }
+             }
+             newParams = {
+                 friction: 0.9, dt: 0.02, forceFactor: 2.0, rMax: 0.35, minDistance: 0.05,
+                 growth: true, temperature: 0.1
+             };
+             console.log("Generated: Reaction-Diffusion");
+             break;
+
+        case 4: // Galactic Systems (Gravity Cores)
+            // Type 0 is the core (heavy mass), others orbit or clump
+            newRules = Array(num).fill(0).map((_, r) => 
+                Array(num).fill(0).map((_, c) => {
+                    if (c === 0) return 1.0; // Everyone loves type 0
+                    if (r === 0) return 0.0; // Type 0 is indifferent
+                    return -0.2; // Others repel each other to form rings
+                })
+            );
+            newParams = {
+                 friction: 0.98, dt: 0.02, forceFactor: 2.5, rMax: 0.6, minDistance: 0.04,
+                 growth: false, temperature: 0.1
+            };
+            console.log("Generated: Galactic Systems");
+            break;
     }
 
     setRules(newRules);
