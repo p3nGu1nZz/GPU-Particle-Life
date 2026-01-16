@@ -85,8 +85,8 @@ struct Params {
     mouseY: f32,
     mouseType: f32,
     temperature: f32, // Thermal Energy
-    pad0: f32,
-    pad1: f32,
+    mouseRadius: f32, // pad0 -> mouseRadius
+    mouseForce: f32,  // pad1 -> mouseForce
     pad2: f32,
 };
 
@@ -171,8 +171,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         let dm = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
         let distM = length(dm);
         
-        if (distM < 0.4) { 
-             let mForce = (1.0 - distM / 0.4) * 10.0; 
+        // Use params.mouseRadius and mouseForce
+        let mRadius = params.mouseRadius;
+        if (distM < mRadius) { 
+             let mForce = (1.0 - distM / mRadius) * params.mouseForce; 
              force += (dm / (distM + 0.001)) * mForce * params.mouseType;
         }
     }
@@ -382,6 +384,9 @@ struct Params {
     mouseY: f32,
     mouseType: f32,
     temperature: f32,
+    mouseRadius: f32,
+    mouseForce: f32,
+    pad2: f32,
 };
 
 struct Color {
@@ -398,7 +403,6 @@ fn vs_main(
     @builtin(vertex_index) vIdx: u32,
     @builtin(instance_index) iIdx: u32
 ) -> VertexOutput {
-    // Access High Precision Position (B)
     let packedB = particlesB[iIdx];
     let pos = unpack2x16float(packedB.x);
     let vel = unpack2x16float(packedB.y);
@@ -406,38 +410,31 @@ fn vs_main(
     let density = state.x;
     let age = state.y;
 
-    // Access Type (A)
     let packedA = particlesA[iIdx];
     let typeIdx = (packedA >> 24u) & 0xFFu;
     
-    // --- Screen Dimensions & Culling ---
-    // Ensure we never divide by zero or very small numbers
     let screenW = max(1.0, params.width);
     let screenH = max(1.0, params.height);
     
-    // Frustum culling margin (approximate max particle size in NDC)
-    let maxParticleSizePx = params.size * 8.0; 
+    // Increased margin for culling to account for larger glow
+    let maxParticleSizePx = params.size * 12.0; 
     let maxExtentX = (maxParticleSizePx / screenW) * 2.0;
     let maxExtentY = (maxParticleSizePx / screenH) * 2.0;
     
-    // Cull if outside view (plus margin)
     if (abs(pos.x) > (1.0 + maxExtentX) || abs(pos.y) > (1.0 + maxExtentY)) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0); 
         return cullOut;
     }
 
-    // --- Color & Alpha Logic ---
     let maxType = i32(params.numTypes) - 1;
     let cType = clamp(i32(typeIdx), 0, maxType);
     let colorData = colors[cType];
     
     var baseAlpha = 1.0;
-    if (cType == 0) { baseAlpha = 0.3; } // Food is transparent
+    if (cType == 0) { baseAlpha = 0.3; } 
     
     let growthFactor = min(1.0, age * 2.0); 
-    
-    // Calculate maximum potential alpha to determine visibility
     let maxAlpha = params.opacity * colorData.a * baseAlpha * growthFactor;
     
     if (maxAlpha < 0.005) {
@@ -446,31 +443,26 @@ fn vs_main(
         return cullOut;
     }
 
-    // --- Dynamic Sizing ---
-    // Calculate visible radius based on alpha falloff to reduce overdraw
-    // pow(0.01 / maxAlpha, 0.4) estimates where the gaussian dropoff hits ~1% opacity
+    // Ensure the visible radius covers the glow (which extends to uv=1.0)
+    // We relax the cutoff significantly for the glow effect
     let safeAlpha = max(maxAlpha, 0.001);
-    let cutoff = pow(0.01 / safeAlpha, 0.4);
-    let visibleRadius = clamp(1.0 - cutoff, 0.2, 1.0);
+    let visibleRadius = clamp(1.4 - pow(0.01 / safeAlpha, 0.5), 0.5, 1.5);
 
-    // Calculate final pixel size
-    let quadSizePx = params.size * 4.0 * growthFactor * visibleRadius;
+    // Quad size needs to be larger for the glow field
+    let quadSizePx = params.size * 5.0 * growthFactor * visibleRadius;
     
-    // Don't render sub-pixel particles
     if (quadSizePx < 0.5) {
         var cullOut: VertexOutput;
         cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
         return cullOut;
     }
     
-    // --- Geometry Construction ---
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
         vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
     );
-    let rawOffset = offsets[vIdx]; // [-1, 1]
+    let rawOffset = offsets[vIdx]; 
     
-    // Velocity Deformation (Stretch/Squash)
     let speed = length(vel);
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
@@ -478,22 +470,18 @@ fn vs_main(
     }
     let perp = vec2f(-dir.y, dir.x);
     
+    // Stretch effect
     let stretch = clamp(1.0 + speed * 1.5, 1.0, 2.5);
     let squash = 1.0 / sqrt(stretch); 
     
-    // Apply rotation to the unit offset
     let rotOffset = (dir * rawOffset.x * stretch) + (perp * rawOffset.y * squash);
-    
-    // Scale to pixels
     let finalOffsetPx = rotOffset * quadSizePx;
 
-    // Convert pixels to NDC [2.0/W, 2.0/H]
     let offsetNDC = finalOffsetPx * vec2f(2.0 / screenW, 2.0 / screenH);
-    // Correct Y aspect is implicit because screenH is used directly
 
     var output: VertexOutput;
     output.position = vec4f(pos + offsetNDC, 0.5, 1.0);
-    output.uv = rawOffset * visibleRadius; // Pass correct UV scale for fragment shader
+    output.uv = rawOffset * visibleRadius; 
     output.speed = speed;
     output.color = vec4f(colorData.r, colorData.g, colorData.b, baseAlpha);
     output.extra = vec2f(density, age);
@@ -505,7 +493,7 @@ fn vs_main(
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let uv = input.uv;
     let d2 = dot(uv, uv);
-    if (d2 > 1.0) { discard; }
+    if (d2 > 1.2) { discard; } // Allow slightly outside unit circle for soft glow edge
 
     let r = sqrt(d2); 
     
@@ -513,42 +501,62 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let age = input.extra.y;
     let baseColor = input.color.rgb;
 
-    let edgeWidth = 0.15;
-    let edgeStart = 1.0 - edgeWidth;
-    let membrane = smoothstep(edgeStart - 0.05, edgeStart, r) * smoothstep(1.0, 0.95, r);
+    // --- Bioelectric Field Parameters ---
     
-    let body = smoothstep(1.0, 0.2, r);
+    // Density determines "stress" or energy level
+    let stressFactor = smoothstep(5.0, 50.0, density);
     
-    let stressFactor = smoothstep(5.0, 40.0, density);
-
-    let pulseSpeed = 2.0 + (stressFactor * 8.0);
-    let pulsePhase = sin(params.time * pulseSpeed);
+    // Pulse driven by time and density
+    // High stress = faster, more intense pulsing
+    let pulseSpeed = 3.0 + (stressFactor * 10.0);
+    let pulse = 0.85 + 0.15 * sin(params.time * pulseSpeed - r * 5.0);
     
-    let pulseAmp = 0.05 + (stressFactor * 0.15); 
+    // 1. Core Structure (The Solid Matter)
+    // Shrink core to r < 0.4 to allow room for outer glow
+    let coreRadius = 0.45;
+    let body = smoothstep(coreRadius + 0.05, coreRadius - 0.1, r);
     
-    let nucleusBaseSize = 0.25;
-    let currentNucleusSize = nucleusBaseSize + (pulsePhase * pulseAmp);
+    // 2. The Bioelectric Glow (The Field)
+    // Soft exponential falloff from center to edge
+    let field = pow(max(0.0, 1.1 - r), 2.5);
     
-    let nucleus = smoothstep(currentNucleusSize + 0.15, currentNucleusSize, r);
+    // 3. Nucleus (The Spark)
+    let nucleus = smoothstep(0.15, 0.0, r);
+    
+    // --- Color Composition ---
+    
+    // Energy shift: As stress increases, color shifts towards electric blue/white
+    let electricTint = vec3f(0.6, 0.9, 1.0); // Cyan/Blue glow
+    let activeColor = mix(baseColor, electricTint, stressFactor * 0.6);
+    let brightCore = mix(baseColor, vec3f(1.0), 0.5);
 
-    let maturity = smoothstep(0.0, 2.0, age);
-    let matureBodyColor = mix(vec3f(0.95), baseColor, 0.6 + 0.4 * maturity);
-
-    let stressColor = mix(vec3f(1.0), vec3f(1.0, 0.4, 0.1), stressFactor); 
-    let nucleusColor = mix(vec3f(1.0), stressColor, 0.8 + 0.2 * pulsePhase);
-
-    var finalColor = matureBodyColor * body * 0.7; 
-    finalColor += baseColor * membrane * 1.8;
-    finalColor = mix(finalColor, nucleusColor, nucleus * 0.9);
-
+    // Combine layers
+    var finalColor = activeColor * body * 0.6; // Solid body
+    
+    // Add Field Glow (Additive)
+    // Intensity modulated by stress and pulse
+    let glowStrength = 0.5 + (stressFactor * 1.0); 
+    finalColor += activeColor * field * pulse * glowStrength;
+    
+    // Add Nucleus
+    finalColor += brightCore * nucleus * 0.8;
+    
+    // Motion Trail boost
     let speed = min(input.speed, 3.0);
-    finalColor += vec3f(0.1) * speed; 
+    finalColor += vec3f(0.1, 0.2, 0.3) * speed * field; 
 
-    let alpha = params.opacity * input.color.a * smoothstep(1.0, 0.85, r);
+    // --- Alpha & Visibility ---
     
-    if (alpha < 0.01) { discard; }
+    // Shape alpha mask
+    let alphaShape = body + (field * 0.4); 
+    let alpha = params.opacity * input.color.a * alphaShape;
+    
+    // Boost visibility for high-energy particles so they don't fade in clumps
+    let energyVisibility = 1.0 + (stressFactor * 0.5);
+    
+    if (alpha < 0.005) { discard; }
 
-    return vec4f(finalColor * alpha, alpha);
+    return vec4f(finalColor * alpha * energyVisibility, alpha);
 }
 `;
 
@@ -914,7 +922,9 @@ export class SimulationEngine {
             0.0, // mouseY
             0.0, // mouseType
             params.temperature,
-            0.0, 0.0, 0.0 // Padding
+            params.mouseInteractionRadius,
+            params.mouseInteractionForce,
+            0.0 // pad2
         ]);
         this.paramsData = data;
 
@@ -996,6 +1006,8 @@ export class SimulationEngine {
         this.paramsData[10] = params.numTypes;
         this.paramsData[12] = params.growth ? 1.0 : 0.0;
         this.paramsData[16] = params.temperature;
+        this.paramsData[17] = params.mouseInteractionRadius;
+        this.paramsData[18] = params.mouseInteractionForce;
         
         this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
         if(needsBindGroupUpdate) this.updateBindGroups();
