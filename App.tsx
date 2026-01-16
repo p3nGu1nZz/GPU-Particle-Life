@@ -129,71 +129,114 @@ const App: React.FC = () => {
   }, [isPaused]);
 
   // --- Advanced Organism Generation ---
-  // This constructs a "Life Matrix" designed to create chains, membranes, and internal pressures.
   const handleGenerateOrganisms = useCallback(() => {
     const num = colors.length;
-    
-    const newRules = Array(num).fill(0).map((_, row) => 
-         Array(num).fill(0).map((_, col) => {
-             const dist = col - row;
-             const absDist = Math.abs(dist);
+    const strategy = Math.random();
+    let newRules: number[][] = [];
+    let newParams: Partial<SimulationParams> = {};
 
-             // --- 1. Food (Type 0) Interactions ---
-             if (row === 0) {
-                 // Food is slightly repelled by everything (pressure)
-                 return -0.05; 
-             }
-             if (col === 0) {
-                 // "Mouths": Low index types (1-4) attract food
-                 if (row <= 4) return 0.8; 
-                 return 0.0; 
-             }
+    if (strategy < 0.33) {
+        // Strategy 1: Complex Polymers & Snakes
+        // Focus: Gradient attraction (i -> i+1) to form chains, with structural stiffness (i -/> i+2)
+        newRules = Array(num).fill(0).map((_, row) => 
+            Array(num).fill(0).map((_, col) => {
+                const dist = col - row;
+                const absDist = Math.abs(dist);
+                
+                // Self: Mild attraction for cohesion
+                if (row === col) return 0.2; 
+                
+                // Chain Formation: Strong pull to next index, neutral to previous (directional)
+                if (dist === 1 || dist === -(num-1)) return 0.7; 
+                if (dist === -1 || dist === (num-1)) return 0.0;
+                
+                // Stiffness: Repel 2nd neighbor to prevent collapsing into a point
+                if (absDist === 2) return -0.4; 
+                
+                // Background: Mild repulsion to keep separate chains distinct
+                return -0.1;
+            })
+        );
+        newParams = {
+            friction: 0.9,
+            dt: 0.02,
+            forceFactor: 1.5,
+            rMax: 0.18,
+            minDistance: 0.05,
+            growth: true, // Allow chains to grow
+            temperature: 0.1 // Some heat to wiggle chains
+        };
+        console.log("Generated: Polymers");
 
-             // --- 2. Self-Clustering (Tissue Integrity) ---
-             if (absDist === 0) {
-                 // Cohesion. Higher index = tougher skin
-                 return 0.4 + (row / num) * 0.6; 
-             }
+    } else if (strategy < 0.66) {
+        // Strategy 2: Cyclic Swarms (Rock-Paper-Scissors)
+        // Focus: Chaotic chasing fronts. A eats B, B eats C.
+        newRules = Array(num).fill(0).map((_, row) => 
+            Array(num).fill(0).map((_, col) => {
+                // Calculate cyclic distance
+                const dist = (col - row + num) % num;
+                
+                // Self: Strong repulsion to spread out (gas-like)
+                if (dist === 0) return -0.4;
+                
+                // Prey: Attract to things 'ahead' in the cycle
+                if (dist > 0 && dist <= num / 3) return 0.5;
+                
+                // Predator: Repel from things 'behind' in the cycle
+                if (dist > (2 * num) / 3) return -0.8;
+                
+                return -0.05;
+            })
+        );
+        newParams = {
+            friction: 0.82, // Lower friction for fluid motion
+            dt: 0.025,
+            forceFactor: 1.2,
+            rMax: 0.22,
+            minDistance: 0.03,
+            growth: false, // Growth interferes with pure cyclic dynamics
+            temperature: 0.0 // Deterministic chaos is preferred here
+        };
+        console.log("Generated: Cyclic Swarms");
 
-             // --- 3. Chains & Skeletons (Nearest Neighbor) ---
-             if (absDist === 1) {
-                 // Strong bonds to adjacent types create gradient chains
-                 // Asymmetry creates directional flow/movement
-                 return (dist > 0) ? 0.6 : 0.2;
-             }
+    } else {
+        // Strategy 3: Tissue Lattices & Membranes
+        // Focus: High self-cohesion with specific cross-links to form multi-cellular structures
+        newRules = Array(num).fill(0).map((_, row) => 
+            Array(num).fill(0).map((_, col) => {
+                if (row === col) return 0.8; // Strong self-cohesion
+                return -0.25; // Default strong background repulsion (immiscible fluids)
+            })
+        );
+        
+        // Add random specific "binding sites" (disulfide bonds)
+        const numBonds = Math.floor(num * 1.5);
+        for(let i=0; i<numBonds; i++) {
+            const r = Math.floor(Math.random() * num);
+            const c = Math.floor(Math.random() * num);
+            if (r !== c) {
+                const strength = 0.4 + Math.random() * 0.6;
+                newRules[r][c] = strength;
+                newRules[c][r] = strength; // Symmetric
+            }
+        }
+        
+        newParams = {
+            friction: 0.95, // High friction for rigid structures
+            dt: 0.015, // Smaller time step for stability
+            forceFactor: 3.0, // Strong forces
+            rMax: 0.3, // Large radius for cellular interaction
+            minDistance: 0.06,
+            growth: true,
+            temperature: 0.05
+        };
+        console.log("Generated: Tissue Lattices");
+    }
 
-             // --- 4. Structural Stiffness (Second Neighbor) ---
-             if (absDist === 2) {
-                 // Repulsion to prevent chains from collapsing into points
-                 return -0.3;
-             }
-             
-             // --- 5. Complex Folding ---
-             if (absDist === 3) return 0.1; // Weak attraction for folding
-             
-             // --- 6. Global Separation ---
-             // Distant types repel to keep organs distinct
-             if (absDist > 4) return -0.4;
-
-             return -0.1;
-         })
-    );
-    
     setRules(newRules);
+    setParams(p => ({ ...p, ...newParams }));
     
-    // Set optimal parameters for this life configuration
-    setParams(p => ({
-        ...p,
-        friction: 0.94, // Very High friction for stable structures
-        dt: 0.02,
-        forceFactor: 2.5, // Strong bonding to overcome drift
-        rMax: 0.25, // Large interaction radius to encourage complexity
-        minDistance: 0.04, 
-        growth: true, 
-        temperature: 0.05 // Lower temperature to prevent "shaking" death
-    }));
-    
-    // Reset simulation state
+    // Reset simulation state to apply new rules cleanly
     setTimeout(() => engineRef.current?.reset(), 50);
   }, [colors.length]);
 

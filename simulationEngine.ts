@@ -447,9 +447,20 @@ fn vs_main(
     // We relax the cutoff significantly for the glow effect
     let safeAlpha = max(maxAlpha, 0.001);
     let visibleRadius = clamp(1.4 - pow(0.01 / safeAlpha, 0.5), 0.5, 1.5);
+    
+    // Velocity calculation for sizing
+    let speed = length(vel);
+
+    // Adaptive Sizing Logic
+    // Expand based on density (pressure/crowding) and speed (energy)
+    let densityScale = smoothstep(5.0, 50.0, density); 
+    let speedScale = smoothstep(0.1, 3.0, speed);
+    
+    // Scale up to 1.6x based on conditions
+    let adaptiveScale = 1.0 + (densityScale * 0.4) + (speedScale * 0.2);
 
     // Quad size needs to be larger for the glow field
-    let quadSizePx = params.size * 5.0 * growthFactor * visibleRadius;
+    let quadSizePx = params.size * 5.0 * growthFactor * visibleRadius * adaptiveScale;
     
     if (quadSizePx < 0.5) {
         var cullOut: VertexOutput;
@@ -463,7 +474,6 @@ fn vs_main(
     );
     let rawOffset = offsets[vIdx]; 
     
-    let speed = length(vel);
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
         dir = vel / speed;
