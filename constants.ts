@@ -69,11 +69,11 @@ export const DEFAULT_COLORS: ColorDefinition[] = [
 ];
 
 export const DEFAULT_PARAMS: SimulationParams = {
-    particleCount: 40000, // Increased for larger/denser structures
-    friction: 0.92, // Higher friction stabilizes complex structures
+    particleCount: 40000, 
+    friction: 0.94, // Increased friction
     dt: 0.02,
-    rMax: 0.2, // Larger interaction radius allows multi-layer organisms
-    forceFactor: 2.0, // Stronger bonds
+    rMax: 0.25, // Increased interaction radius
+    forceFactor: 2.0, 
     minDistance: 0.04,
     particleSize: 1.0,
     trails: true,
@@ -81,9 +81,9 @@ export const DEFAULT_PARAMS: SimulationParams = {
     gpuPreference: 'high-performance',
     blendMode: 'additive',
     baseColorOpacity: 0.8,
-    numTypes: 12, // Enough for complexity, manageable for performance
+    numTypes: 12, 
     growth: true,
-    temperature: 0.1, // Lower temp to prevent structures from melting
+    temperature: 0.05, // Reduced temperature
     mouseInteractionRadius: 0.4,
     mouseInteractionForce: 8
 };

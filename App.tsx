@@ -184,13 +184,13 @@ const App: React.FC = () => {
     // Set optimal parameters for this life configuration
     setParams(p => ({
         ...p,
-        friction: 0.92, // High friction for stable structures
+        friction: 0.94, // Very High friction for stable structures
         dt: 0.02,
-        forceFactor: 2.0, // Strong bonding
-        rMax: 0.18, 
+        forceFactor: 2.5, // Strong bonding to overcome drift
+        rMax: 0.25, // Large interaction radius to encourage complexity
         minDistance: 0.04, 
         growth: true, 
-        temperature: 0.15 
+        temperature: 0.05 // Lower temperature to prevent "shaking" death
     }));
     
     // Reset simulation state
@@ -238,13 +238,15 @@ const App: React.FC = () => {
                       }
                   }
               } else {
-                  // Genetic Drift
+                  // Genetic Drift - Smoother, less destructive
                   if (Math.random() < driftRate) {
                       const i = Math.floor(Math.random() * size);
                       const j = Math.floor(Math.random() * size);
                       
-                      if (i !== 0 && j !== 0) {
-                          nextRules[i][j] += (Math.random() - 0.5) * driftStrength;
+                      if (i !== 0 && j !== 0 && i !== j) {
+                          // Bias slightly positive to encourage clumping
+                          const bias = 0.01;
+                          nextRules[i][j] += (Math.random() - 0.5 + bias) * driftStrength;
                       }
                   }
               }
@@ -262,7 +264,7 @@ const App: React.FC = () => {
 
               return nextRules;
           });
-      }, 200); 
+      }, 500); // Slower evolution tick (was 200ms) to allow structures to settle
 
       return () => clearInterval(evolutionInterval);
   }, [isMutating, isPaused, mutationRate, driftRate, driftStrength]);

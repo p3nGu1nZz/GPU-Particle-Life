@@ -150,6 +150,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var newColor = f32(myType); 
     var localDensity = 0.0; 
     var nearNeighbors = 0.0;
+    var foreignNeighbors = 0.0;
 
     // --- Optimization: Rule Caching ---
     var myRules: array<f32, 64>;
@@ -223,11 +224,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 
                 localDensity += (1.0 - dist * rMaxInv);
 
-                if (growthEnabled && dist < 0.05) {
+                // Check for metabolic conditions (Growth/Decay/Differentiation)
+                // Expanded radius for "Social" sensing (diversity checks)
+                if (growthEnabled && dist < 0.15) {
                     nearNeighbors += 1.0;
-                    if (myType == 0u && nType > 0u) {
-                         // Density-dependent growth
-                         if (localDensity < 15.0 && randomVal < 0.01) {
+                    
+                    if (nType > 0u && nType != myType) {
+                        foreignNeighbors += 1.0;
+                    }
+
+                    if (myType == 0u && nType > 0u && dist < 0.1) {
+                         // Density-dependent growth (Infection)
+                         // If area is not too crowded and we get lucky
+                         if (localDensity < 20.0 && randomVal < 0.003) {
                              newColor = f32(nType);
                          }
                     }
@@ -258,12 +267,37 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         var density = state.x;
         var age = state.y;
 
-        // --- Metabolic Decay ---
+        // --- Metabolic Logic ---
         if (growthEnabled && myType > 0u) {
-            let overCrowded = nearNeighbors > 20.0; 
-            let lonely = nearNeighbors < 1.0;
-            if ((overCrowded || lonely) && randomVal < 0.02) {
+            // 1. Decay Rules (Overcrowding / Isolation)
+            let overCrowded = nearNeighbors > 45.0; 
+            let lonely = nearNeighbors < 1.0; 
+            
+            if ((overCrowded || lonely) && randomVal < 0.0005) {
                 newColor = 0.0; 
+            }
+            
+            // Random entropy death (Old Age)
+            if (randomVal > 0.99995) {
+                newColor = 0.0;
+            }
+
+            // 2. Differentiation (Specialization)
+            let diversity = foreignNeighbors / (nearNeighbors + 0.1);
+            
+            // Rule: If mature (age > 5s) and surrounded by identical clones (low diversity),
+            // differentiate to the next type to form complex tissues (e.g., skin layers).
+            if (age > 5.0 && diversity < 0.15 && nearNeighbors > 5.0) {
+                 // Use a secondary hash to ensure independent probability
+                 let diffChance = fast_hash(vec2f(randomVal, age));
+                 if (diffChance < 0.005) {
+                     let numTypes = u32(params.numTypes);
+                     // Cycle to next type (skipping Food/0)
+                     let nextType = (myType % (numTypes - 1u)) + 1u;
+                     newColor = f32(nextType);
+                     // Reset age to indicate new cell state
+                     age = 0.0; 
+                 }
             }
         }
 
