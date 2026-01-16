@@ -284,22 +284,32 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 newColor = 0.0;
             }
 
-            // 2. Differentiation (Specialization)
+            // 2. Refined Differentiation (Specialization)
             let diversity = foreignNeighbors / (nearNeighbors + 0.1);
             
-            // Rule: If mature (age > 5s) and surrounded by identical clones (low diversity),
-            // differentiate to the next type to form complex tissues (e.g., skin layers).
-            if (age > 5.0 && diversity < 0.15 && nearNeighbors > 5.0) {
-                 // Use a secondary hash to ensure independent probability
+            // Rule A: Structural Differentiation (Layering)
+            // Mature cells in dense monocultures (low diversity) differentiate to form layers/tissues
+            if (age > 4.0 && diversity < 0.15 && nearNeighbors > 8.0) {
                  let diffChance = fast_hash(vec2f(randomVal, age));
-                 if (diffChance < 0.005) {
+                 if (diffChance < 0.004) {
                      let numTypes = u32(params.numTypes);
-                     // Cycle to next type (skipping Food/0)
+                     // Cycle to next type to form ordered layers (Type A -> Type B)
                      let nextType = (myType % (numTypes - 1u)) + 1u;
                      newColor = f32(nextType);
-                     // Reset age to indicate new cell state
-                     age = 0.0; 
+                     age = 0.0; // Reset age as new cell type
                  }
+            }
+
+            // Rule B: Stress Mutation (Evolution)
+            // Cells in chaotic, high-diversity environments randomly mutate to find stability
+            if (diversity > 0.75 && nearNeighbors > 5.0) {
+                let mutChance = fast_hash(vec2f(density, randomVal));
+                if (mutChance < 0.002) {
+                    let numTypes = u32(params.numTypes);
+                    let randomType = (u32(mutChance * 1000.0) % (numTypes - 1u)) + 1u;
+                    newColor = f32(randomType);
+                    age = 0.0;
+                }
             }
         }
 
