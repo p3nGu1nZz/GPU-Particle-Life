@@ -288,21 +288,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
             let diversity = foreignNeighbors / (nearNeighbors + 0.1);
             
             // Rule A: Structural Differentiation (Layering)
-            // Mature cells in dense monocultures (low diversity) differentiate to form layers/tissues
-            if (age > 4.0 && diversity < 0.15 && nearNeighbors > 8.0) {
-                 let diffChance = fast_hash(vec2f(randomVal, age));
-                 if (diffChance < 0.004) {
-                     let numTypes = u32(params.numTypes);
-                     // Cycle to next type to form ordered layers (Type A -> Type B)
-                     let nextType = (myType % (numTypes - 1u)) + 1u;
-                     newColor = f32(nextType);
-                     age = 0.0; // Reset age as new cell type
-                 }
+            // Probability increases with Age, Crowd, and Purity (Monoculture)
+            // This encourages "skin" or "tissue" formation on mature clusters
+            let ageFactor = smoothstep(2.0, 10.0, age);
+            let crowdFactor = smoothstep(5.0, 25.0, nearNeighbors);
+            let monocultureFactor = 1.0 - smoothstep(0.0, 0.2, diversity);
+
+            // Chance to evolve to next state
+            let diffChance = 0.01 * ageFactor * crowdFactor * monocultureFactor;
+            
+            // Independent RNG for differentiation event
+            let diffRng = fast_hash(vec2f(randomVal, age));
+            
+            if (diffRng < diffChance) {
+                 let numTypes = u32(params.numTypes);
+                 // Cycle to next type to form ordered layers (Type A -> Type B)
+                 let nextType = (myType % (numTypes - 1u)) + 1u;
+                 newColor = f32(nextType);
+                 age = 0.0; // Reset age as new cell type
             }
 
             // Rule B: Stress Mutation (Evolution)
             // Cells in chaotic, high-diversity environments randomly mutate to find stability
-            if (diversity > 0.75 && nearNeighbors > 5.0) {
+            if (diversity > 0.6 && nearNeighbors > 10.0) {
                 let mutChance = fast_hash(vec2f(density, randomVal));
                 if (mutChance < 0.002) {
                     let numTypes = u32(params.numTypes);
