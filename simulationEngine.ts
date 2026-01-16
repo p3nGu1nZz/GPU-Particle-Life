@@ -463,11 +463,12 @@ fn vs_main(
 
     // Adaptive Sizing Logic
     // Expand based on density (pressure/crowding) and speed (energy)
-    let densityScale = smoothstep(5.0, 50.0, density); 
-    let speedScale = smoothstep(0.1, 3.0, speed);
+    // Refined thresholds for subtler yet responsive sizing
+    let densityScale = smoothstep(8.0, 40.0, density); 
+    let speedScale = smoothstep(0.2, 4.0, speed);
     
-    // Scale up to 1.6x based on conditions
-    let adaptiveScale = 1.0 + (densityScale * 0.4) + (speedScale * 0.2);
+    // Scale up to ~1.7x max based on conditions (0.35 density + 0.35 speed)
+    let adaptiveScale = 1.0 + (densityScale * 0.35) + (speedScale * 0.35);
 
     // Quad size needs to be larger for the glow field
     let quadSizePx = params.size * 5.0 * growthFactor * visibleRadius * adaptiveScale;
