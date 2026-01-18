@@ -434,8 +434,8 @@ fn vs_main(
     let screenW = max(1.0, params.width);
     let screenH = max(1.0, params.height);
     
-    // Increased margin for culling to account for larger glow
-    let maxParticleSizePx = params.size * 12.0; 
+    // Increased margin for culling to account for large glow fields
+    let maxParticleSizePx = params.size * 16.0; 
     let maxExtentX = (maxParticleSizePx / screenW) * 2.0;
     let maxExtentY = (maxParticleSizePx / screenH) * 2.0;
     
@@ -450,9 +450,10 @@ fn vs_main(
     let colorData = colors[cType];
     
     var baseAlpha = 1.0;
-    if (cType == 0) { baseAlpha = 0.3; } 
+    if (cType == 0) { baseAlpha = 0.4; } 
     
-    let growthFactor = min(1.0, age * 2.0); 
+    // Grow in from 0 size
+    let growthFactor = smoothstep(0.0, 0.5, age);
     let maxAlpha = params.opacity * colorData.a * baseAlpha * growthFactor;
     
     if (maxAlpha < 0.005) {
@@ -461,25 +462,23 @@ fn vs_main(
         return cullOut;
     }
 
-    // Ensure the visible radius covers the glow (which extends to uv=1.0)
-    // We relax the cutoff significantly for the glow effect
-    let safeAlpha = max(maxAlpha, 0.001);
-    let visibleRadius = clamp(1.4 - pow(0.01 / safeAlpha, 0.5), 0.5, 1.5);
-    
     // Velocity calculation for sizing
     let speed = length(vel);
 
     // Adaptive Sizing Logic
-    // Expand based on density (pressure/crowding) and speed (energy)
-    // Refined thresholds for subtler yet responsive sizing
-    let densityScale = smoothstep(8.0, 40.0, density); 
-    let speedScale = smoothstep(0.2, 4.0, speed);
+    // High density -> Larger size (merged blobs)
+    // High speed -> Larger size (motion blur effect)
+    let densityScale = smoothstep(5.0, 40.0, density); 
+    let speedScale = smoothstep(0.2, 5.0, speed);
     
-    // Scale up to ~1.7x max based on conditions (0.35 density + 0.35 speed)
-    let adaptiveScale = 1.0 + (densityScale * 0.35) + (speedScale * 0.35);
+    let adaptiveScale = 1.0 + (densityScale * 0.5) + (speedScale * 0.3);
 
-    // Quad size needs to be larger for the glow field
-    let quadSizePx = params.size * 5.0 * growthFactor * visibleRadius * adaptiveScale;
+    // Determine visual radius based on alpha to optimize fill rate
+    let safeAlpha = max(maxAlpha, 0.001);
+    let visibleRadius = clamp(1.5 - pow(0.01 / safeAlpha, 0.5), 0.6, 2.0);
+
+    // Quad size calculation
+    let quadSizePx = params.size * 6.0 * growthFactor * visibleRadius * adaptiveScale;
     
     if (quadSizePx < 0.5) {
         var cullOut: VertexOutput;
@@ -493,14 +492,14 @@ fn vs_main(
     );
     let rawOffset = offsets[vIdx]; 
     
+    // Stretch along velocity vector
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
         dir = vel / speed;
     }
     let perp = vec2f(-dir.y, dir.x);
     
-    // Stretch effect
-    let stretch = clamp(1.0 + speed * 1.5, 1.0, 2.5);
+    let stretch = clamp(1.0 + speed * 1.5, 1.0, 3.0);
     let squash = 1.0 / sqrt(stretch); 
     
     let rotOffset = (dir * rawOffset.x * stretch) + (perp * rawOffset.y * squash);
@@ -521,71 +520,86 @@ fn vs_main(
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let uv = input.uv;
-    let d2 = dot(uv, uv);
-    if (d2 > 1.2) { discard; } // Allow slightly outside unit circle for soft glow edge
-
-    let r = sqrt(d2); 
+    let distSq = dot(uv, uv);
     
+    // Soft discard for smooth edges
+    // UVs are scaled by visibleRadius, so 1.0 is the nominal radius, but we allow up to ~2.0 for glow
+    if (distSq > 2.5) { discard; }
+
+    let r = sqrt(distSq);
     let density = input.extra.x;
     let age = input.extra.y;
+    let speed = input.speed;
     let baseColor = input.color.rgb;
+    let baseAlpha = input.color.a;
 
-    // --- Bioelectric Field Parameters ---
-    
-    // Density determines "stress" or energy level
-    let stressFactor = smoothstep(5.0, 50.0, density);
-    
-    // Pulse driven by time and density
-    // High stress = faster, more intense pulsing
-    let pulseSpeed = 3.0 + (stressFactor * 10.0);
-    let pulse = 0.85 + 0.15 * sin(params.time * pulseSpeed - r * 5.0);
-    
-    // 1. Core Structure (The Solid Matter)
-    // Shrink core to r < 0.4 to allow room for outer glow
-    let coreRadius = 0.45;
-    let body = smoothstep(coreRadius + 0.05, coreRadius - 0.1, r);
-    
-    // 2. The Bioelectric Glow (The Field)
-    // Soft exponential falloff from center to edge
-    let field = pow(max(0.0, 1.1 - r), 2.5);
-    
-    // 3. Nucleus (The Spark)
-    let nucleus = smoothstep(0.15, 0.0, r);
-    
-    // --- Color Composition ---
-    
-    // Energy shift: As stress increases, color shifts towards electric blue/white
-    let electricTint = vec3f(0.6, 0.9, 1.0); // Cyan/Blue glow
-    let activeColor = mix(baseColor, electricTint, stressFactor * 0.6);
-    let brightCore = mix(baseColor, vec3f(1.0), 0.5);
+    // --- Bioelectric Field Simulation ---
 
-    // Combine layers
-    var finalColor = activeColor * body * 0.6; // Solid body
+    // 1. Energy Calculation
+    // Density represents pressure/stress
+    let stress = smoothstep(5.0, 50.0, density);
+    // Speed represents kinetic energy
+    let kinetic = smoothstep(0.0, 5.0, speed);
     
-    // Add Field Glow (Additive)
-    // Intensity modulated by stress and pulse
-    let glowStrength = 0.5 + (stressFactor * 1.0); 
-    finalColor += activeColor * field * pulse * glowStrength;
-    
-    // Add Nucleus
-    finalColor += brightCore * nucleus * 0.8;
-    
-    // Motion Trail boost
-    let speed = min(input.speed, 3.0);
-    finalColor += vec3f(0.1, 0.2, 0.3) * speed * field; 
+    let totalEnergy = clamp(stress + kinetic * 0.4, 0.0, 1.0);
 
-    // --- Alpha & Visibility ---
+    // 2. Dynamic Pulsing
+    // Higher energy = faster, more erratic pulse
+    let time = params.time;
+    let pulseFreq = 2.0 + (totalEnergy * 10.0);
+    // Ripple effect radiating from center
+    let ripple = sin(time * pulseFreq - r * 6.0);
+    let pulseIntensity = 0.8 + 0.2 * ripple;
+
+    // 3. Structural Layers
+    // Core: The dense matter center
+    let coreRadius = 0.35 + (stress * 0.1); // Core expands under pressure
+    let coreShape = smoothstep(coreRadius + 0.1, coreRadius - 0.1, r);
     
-    // Shape alpha mask
-    let alphaShape = body + (field * 0.4); 
-    let alpha = params.opacity * input.color.a * alphaShape;
+    // Field: The bioelectric glow (Exponential falloff)
+    let fieldIntensity = exp(-r * (2.5 - stress)) * 0.8;
     
-    // Boost visibility for high-energy particles so they don't fade in clumps
-    let energyVisibility = 1.0 + (stressFactor * 0.5);
+    // Spark: Bright center point
+    let spark = smoothstep(0.1, 0.0, r);
+
+    // 4. Chromatic Shift
+    // Low energy = Base Color
+    // High energy = Shifts towards Cyan/White (Electric)
+    let electricTint = vec3f(0.4, 0.8, 1.0); 
+    // Mix factor increases with energy
+    let colorMix = smoothstep(0.2, 0.8, totalEnergy);
+    let activeColor = mix(baseColor, electricTint, colorMix * 0.7);
     
+    // 5. Compose Final Color
+    var color = activeColor * coreShape; // Solid Body
+    
+    // Add Glow
+    let glowColor = mix(baseColor, electricTint, 0.5);
+    color += glowColor * fieldIntensity * pulseIntensity * (0.5 + totalEnergy);
+    
+    // Add Spark
+    color += vec3f(1.0) * spark * 0.9;
+    
+    // 6. Age & Life Cycle Effects
+    // Birth Flash
+    if (age < 0.3) {
+        let flash = smoothstep(0.3, 0.0, age);
+        color = mix(color, vec3f(1.0), flash * 0.7);
+    }
+    
+    // 7. Alpha Composition
+    let shapeAlpha = coreShape + (fieldIntensity * 0.5);
+    var alpha = params.opacity * baseAlpha * shapeAlpha;
+    
+    // Boost visibility for high energy particles
+    alpha *= (0.7 + 0.6 * totalEnergy);
+    
+    // Soft outer edge fade
+    alpha *= smoothstep(1.6, 0.5, r);
+
     if (alpha < 0.005) { discard; }
 
-    return vec4f(finalColor * alpha * energyVisibility, alpha);
+    return vec4f(color * alpha, alpha);
 }
 `;
 
