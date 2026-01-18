@@ -230,35 +230,57 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         var density = state.x;
         var age = state.y;
 
+        // --- Metabolic & Differentiation Logic ---
         if (growthEnabled && myType > 0u) {
-            let overCrowded = nearNeighbors > 45.0; 
-            let lonely = nearNeighbors < 1.0; 
+            var survive = true;
             
-            if ((overCrowded || lonely) && randomVal < 0.0005) { newColor = 0.0; }
-            if (randomVal > 0.99995) { newColor = 0.0; }
-
-            let diversity = foreignNeighbors / (nearNeighbors + 0.1);
-            let ageFactor = smoothstep(2.0, 10.0, age);
-            let crowdFactor = smoothstep(5.0, 25.0, nearNeighbors);
-            let monocultureFactor = 1.0 - smoothstep(0.0, 0.2, diversity);
-
-            let diffChance = 0.01 * ageFactor * crowdFactor * monocultureFactor;
-            let diffRng = fast_hash(vec2f(randomVal, age));
+            // 1. Necrosis (Pressure/Overcrowding)
+            // If density is extremely high, cells die
+            if (nearNeighbors > 50.0 && randomVal < 0.005) { survive = false; }
             
-            if (diffRng < diffChance) {
-                 let numTypes = u32(params.numTypes);
-                 let nextType = (myType % (numTypes - 1u)) + 1u;
-                 newColor = f32(nextType);
-                 age = 0.0; 
-            }
+            // 2. Apoptosis (Isolation)
+            // If completely isolated for too long, die.
+            if (nearNeighbors < 1.5 && age > 5.0 && randomVal < 0.001) { survive = false; }
+            
+            // 3. Senescence (Old Age)
+            if (age > 120.0 && randomVal < 0.005) { survive = false; }
+            
+            if (!survive) {
+                newColor = 0.0;
+            } else {
+                // --- Differentiation ---
+                let numTypes = u32(params.numTypes);
+                
+                // Factors for differentiation
+                let maturity = smoothstep(5.0, 30.0, age);         
+                let pressure = smoothstep(15.0, 60.0, localDensity); 
+                let diversity = foreignNeighbors / (nearNeighbors + 0.1);
+                
+                // Re-roll random for differentiation using different seed
+                let diffRng = fast_hash(vec2f(randomVal * 43.0, age));
 
-            if (diversity > 0.6 && nearNeighbors > 10.0) {
-                let mutChance = fast_hash(vec2f(density, randomVal));
-                if (mutChance < 0.002) {
-                    let numTypes = u32(params.numTypes);
-                    let randomType = (u32(mutChance * 1000.0) % (numTypes - 1u)) + 1u;
-                    newColor = f32(randomType);
-                    age = 0.0;
+                // A. Specialized Core Formation (Sequence)
+                // Conditions: Mature, Dense, Surrounded by same type (Monoculture)
+                // Outcome: Differentiate to next type in sequence
+                if (maturity > 0.5 && pressure > 0.4 && diversity < 0.1) {
+                    let evolveChance = 0.008 * maturity * pressure;
+                    if (diffRng < evolveChance) {
+                        let nextType = (myType % (numTypes - 1u)) + 1u;
+                        newColor = f32(nextType);
+                        age = 0.0; // Reset age to stabilize new type
+                    }
+                }
+                
+                // B. Boundary Adaptation (Interface)
+                // Conditions: Mature, Contact with different types
+                // Outcome: Random mutation to try and find equilibrium
+                else if (maturity > 0.2 && diversity > 0.3 && nearNeighbors > 8.0) {
+                     let adaptChance = 0.003 * maturity;
+                     if (diffRng < adaptChance) {
+                         let randomType = (u32(diffRng * 123.0) % (numTypes - 1u)) + 1u;
+                         newColor = f32(randomType);
+                         age = 0.0;
+                     }
                 }
             }
         }
