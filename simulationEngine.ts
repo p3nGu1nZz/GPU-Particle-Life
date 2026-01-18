@@ -382,6 +382,7 @@ struct VertexOutput {
     @location(1) uv: vec2f,
     @location(2) speed: f32,
     @location(3) extra: vec2f, // x: Density, y: Age
+    @location(4) vary: f32,    // Random variation
 };
 
 struct Params {
@@ -506,6 +507,9 @@ fn vs_main(
     let finalOffsetPx = rotOffset * quadSizePx;
 
     let offsetNDC = finalOffsetPx * vec2f(2.0 / screenW, 2.0 / screenH);
+    
+    // Generate stable random variation based on index
+    let vary = fract(sin(f32(iIdx) * 12.9898) * 43758.5453);
 
     var output: VertexOutput;
     output.position = vec4f(pos + offsetNDC, 0.5, 1.0);
@@ -513,8 +517,19 @@ fn vs_main(
     output.speed = speed;
     output.color = vec4f(colorData.r, colorData.g, colorData.b, baseAlpha);
     output.extra = vec2f(density, age);
+    output.vary = vary;
     
     return output;
+}
+
+fn hueShift(color: vec3f, hue: f32) -> vec3f {
+    const k = vec3f(0.57735, 0.57735, 0.57735);
+    let cosAngle = cos(hue);
+    return vec3f(
+        color * cosAngle +
+        cross(k, color) * sin(hue) +
+        k * dot(k, color) * (1.0 - cosAngle)
+    );
 }
 
 @fragment
@@ -522,79 +537,82 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let uv = input.uv;
     let distSq = dot(uv, uv);
     
-    // Soft discard for smooth edges
-    // UVs are scaled by visibleRadius, so 1.0 is the nominal radius, but we allow up to ~2.0 for glow
     if (distSq > 2.5) { discard; }
 
     let r = sqrt(distSq);
     let density = input.extra.x;
     let age = input.extra.y;
     let speed = input.speed;
+    let vary = input.vary;
     let baseColor = input.color.rgb;
     let baseAlpha = input.color.a;
 
+    // --- Color Interpolation & Differentiation ---
+    
+    // 1. Per-Particle Variation (Sub-types)
+    // Slight hue/brightness shift to distinguish individual cells
+    let hueVar = (vary - 0.5) * 0.15; // +/- 0.075 radians (~4 degrees)
+    var distinctColor = hueShift(baseColor, hueVar);
+    
+    // 2. Density-based Hue Shift (Stress)
+    // High density -> Shift hue slightly to indicate pressure/heat
+    // Use density to shift towards "hotter" or "colder" depending on logic
+    let stress = smoothstep(5.0, 50.0, density);
+    let stressHue = stress * 0.5; // Up to ~30 degrees shift
+    distinctColor = hueShift(distinctColor, stressHue);
+
+    // 3. Lifecycle Gradient (Age)
+    // Birth: White/Bright -> Middle: Pure Color -> Old: Darker/Desaturated
+    var lifeColor = distinctColor;
+    if (age < 0.5) {
+        // Birth transition: White -> Color
+        let t = smoothstep(0.0, 0.5, age);
+        lifeColor = mix(vec3f(1.0, 1.0, 1.0), distinctColor, t);
+    } else if (age > 5.0) {
+        // Old age: Darkening
+        let t = smoothstep(5.0, 20.0, age);
+        lifeColor = mix(distinctColor, distinctColor * 0.7, t); 
+    }
+
     // --- Bioelectric Field Simulation ---
 
-    // 1. Energy Calculation
-    // Density represents pressure/stress
-    let stress = smoothstep(5.0, 50.0, density);
-    // Speed represents kinetic energy
+    // Energy Calculation
     let kinetic = smoothstep(0.0, 5.0, speed);
-    
     let totalEnergy = clamp(stress + kinetic * 0.4, 0.0, 1.0);
 
-    // 2. Dynamic Pulsing
-    // Higher energy = faster, more erratic pulse
+    // Dynamic Pulsing
     let time = params.time;
     let pulseFreq = 2.0 + (totalEnergy * 10.0);
-    // Ripple effect radiating from center
-    let ripple = sin(time * pulseFreq - r * 6.0);
+    // Add phase offset based on vary to desynchronize pulses
+    let ripple = sin(time * pulseFreq - r * 6.0 + vary * 6.28);
     let pulseIntensity = 0.8 + 0.2 * ripple;
 
-    // 3. Structural Layers
-    // Core: The dense matter center
-    let coreRadius = 0.35 + (stress * 0.1); // Core expands under pressure
+    // Structural Layers
+    let coreRadius = 0.35 + (stress * 0.1); 
     let coreShape = smoothstep(coreRadius + 0.1, coreRadius - 0.1, r);
-    
-    // Field: The bioelectric glow (Exponential falloff)
     let fieldIntensity = exp(-r * (2.5 - stress)) * 0.8;
-    
-    // Spark: Bright center point
     let spark = smoothstep(0.1, 0.0, r);
 
-    // 4. Chromatic Shift
-    // Low energy = Base Color
-    // High energy = Shifts towards Cyan/White (Electric)
-    let electricTint = vec3f(0.4, 0.8, 1.0); 
-    // Mix factor increases with energy
-    let colorMix = smoothstep(0.2, 0.8, totalEnergy);
-    let activeColor = mix(baseColor, electricTint, colorMix * 0.7);
+    // Electric Tint Mixing
+    // Mix with a high-energy tint (Cyan/White)
+    let electricTint = vec3f(0.6, 0.9, 1.0); 
+    let colorMix = smoothstep(0.3, 0.9, totalEnergy);
+    let activeColor = mix(lifeColor, electricTint, colorMix * 0.6);
     
-    // 5. Compose Final Color
-    var color = activeColor * coreShape; // Solid Body
+    // Final Composition
+    var color = activeColor * coreShape; 
     
-    // Add Glow
-    let glowColor = mix(baseColor, electricTint, 0.5);
+    // Glow uses the lifeColor to maintain identity, mixed with energy
+    let glowColor = mix(lifeColor, electricTint, 0.5);
     color += glowColor * fieldIntensity * pulseIntensity * (0.5 + totalEnergy);
     
-    // Add Spark
     color += vec3f(1.0) * spark * 0.9;
     
-    // 6. Age & Life Cycle Effects
-    // Birth Flash
-    if (age < 0.3) {
-        let flash = smoothstep(0.3, 0.0, age);
-        color = mix(color, vec3f(1.0), flash * 0.7);
-    }
-    
-    // 7. Alpha Composition
+    // Alpha Composition
     let shapeAlpha = coreShape + (fieldIntensity * 0.5);
     var alpha = params.opacity * baseAlpha * shapeAlpha;
     
-    // Boost visibility for high energy particles
     alpha *= (0.7 + 0.6 * totalEnergy);
-    
-    // Soft outer edge fade
     alpha *= smoothstep(1.6, 0.5, r);
 
     if (alpha < 0.005) { discard; }
