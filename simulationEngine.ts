@@ -46,27 +46,12 @@ fn vs_main(@builtin(vertex_index) vIdx: u32) -> @builtin(position) vec4f {
 
 @fragment
 fn fs_main() -> @location(0) vec4f {
-    // Black with alpha 0.15 gives ~85% retention per frame (trails)
-    return vec4f(0.0, 0.0, 0.0, 0.15); 
+    // Black with alpha 0.12 for slightly longer trails
+    return vec4f(0.0, 0.0, 0.0, 0.12); 
 }
 `;
 
 const COMPUTE_SHADER = `
-// Packed Structures Optimization:
-//
-// ParticlesA (Hot Loop Buffer - Reduced to 4 bytes):
-//   u32 containing:
-//   - Bits 0-11 : Position X (12-bit quantized 0..4095)
-//   - Bits 12-23: Position Y (12-bit quantized 0..4095)
-//   - Bits 24-31: Type Index (8-bit 0..255)
-//
-// ParticlesB (State Buffer - Expanded to 16 bytes to preserve precision):
-//   vec4u containing:
-//   .x = High Precision Pos (pack2x16float) - Source of truth for integration
-//   .y = Velocity (pack2x16float)
-//   .z = State (Density f16, Age f16)
-//   .w = Padding / Reserved
-
 struct Params {
     width: f32,
     height: f32,
@@ -84,9 +69,9 @@ struct Params {
     mouseX: f32,
     mouseY: f32,
     mouseType: f32,
-    temperature: f32, // Thermal Energy
-    mouseRadius: f32, // pad0 -> mouseRadius
-    mouseForce: f32,  // pad1 -> mouseForce
+    temperature: f32, 
+    mouseRadius: f32, 
+    mouseForce: f32,  
     pad2: f32,
 };
 
@@ -98,12 +83,9 @@ struct Params {
 const BLOCK_SIZE = 256u;
 const MAX_TYPES = 64u; 
 
-// Unpacked cache in Shared Memory (~3KB total)
-// Stores fully expanded float positions and int types for fast inner-loop access
 var<workgroup> tile_pos: array<vec2f, BLOCK_SIZE>;
 var<workgroup> tile_type: array<u32, BLOCK_SIZE>;
 
-// Faster hash for inner loops
 fn fast_hash(seed: vec2f) -> f32 {
     return fract(sin(dot(seed, vec2f(12.9898, 78.233))) * 43758.5453);
 }
@@ -132,9 +114,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     let bioSeed = params.time + f32(index) * 0.123;
     let randomVal = fast_hash(vec2f(bioSeed, f32(index)));
     
-    // --- Load Self Data ---
-    // We load high-precision position from B for physics stability
-    // We load Type from A
     var myPos = vec2f(0.0);
     var myType = 0u;
     
@@ -152,7 +131,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     var nearNeighbors = 0.0;
     var foreignNeighbors = 0.0;
 
-    // --- Optimization: Rule Caching ---
     var myRules: array<f32, 64>;
     let numTypes = u32(params.numTypes);
     
@@ -164,14 +142,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         }
     }
 
-    // --- Mouse Interaction ---
     if (params.mouseType != 0.0) {
         let mousePos = vec2f(params.mouseX, params.mouseY);
         let rawD = myPos - mousePos;
         let dm = fract(rawD * 0.5 + 0.5) * 2.0 - 1.0;
         let distM = length(dm);
         
-        // Use params.mouseRadius and mouseForce
         let mRadius = params.mouseRadius;
         if (distM < mRadius) { 
              let mForce = (1.0 - distM / mRadius) * params.mouseForce; 
@@ -179,24 +155,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         }
     }
 
-    // --- Tiled N-Body Calculation ---
     for (var i = 0u; i < particleCount; i += BLOCK_SIZE) {
         let tile_idx = i + local_id.x;
         
         if (tile_idx < particleCount) {
             let packed = particlesA[tile_idx];
-            
-            // UNPACK ONCE during load:
-            // Extract 12-bit positions and 8-bit type
             let nx = f32(packed & 0xFFFu);
             let ny = f32((packed >> 12u) & 0xFFFu);
             let nType = (packed >> 24u) & 0xFFu;
             
-            // Normalize 0..4095 -> -1..1
             tile_pos[local_id.x] = vec2f(nx, ny) * (1.0 / 4095.0) * 2.0 - 1.0;
             tile_type[local_id.x] = nType;
         } else {
-            // Sentinel: Position far outside range
             tile_pos[local_id.x] = vec2f(-1000.0, -1000.0);
             tile_type[local_id.x] = 0u;
         }
@@ -209,7 +179,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
             for (var j = 0u; j < BLOCK_SIZE; j++) {
                 if (j >= limit) { break; } 
 
-                // FAST READ: No bitwise ops or casts in the hot loop
                 let otherPos = tile_pos[j];
                 let nType = tile_type[j];
 
@@ -226,18 +195,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 
                 localDensity += (1.0 - dist * rMaxInv);
 
-                // Check for metabolic conditions (Growth/Decay/Differentiation)
-                // Expanded radius for "Social" sensing (diversity checks)
                 if (growthEnabled && dist < 0.15) {
                     nearNeighbors += 1.0;
-                    
                     if (nType > 0u && nType != myType) {
                         foreignNeighbors += 1.0;
                     }
-
                     if (myType == 0u && nType > 0u && dist < 0.1) {
-                         // Density-dependent growth (Infection)
-                         // If area is not too crowded and we get lucky
                          if (localDensity < 20.0 && randomVal < 0.003) {
                              newColor = f32(nType);
                          }
@@ -245,7 +208,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
                 }
 
                 var f = 0.0;
-                
                 if (dist < safeRMin) {
                     let repulse = 1.0 - (dist / safeRMin);
                     f = -20.0 * repulse * repulse;
@@ -262,54 +224,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
     }
 
     if (index < particleCount) {
-        // Load B state (16 bytes read - OK for once per thread)
         let packedB = particlesB[index];
         var vel = unpack2x16float(packedB.y);
         let state = unpack2x16float(packedB.z);
         var density = state.x;
         var age = state.y;
 
-        // --- Metabolic Logic ---
         if (growthEnabled && myType > 0u) {
-            // 1. Decay Rules (Overcrowding / Isolation)
             let overCrowded = nearNeighbors > 45.0; 
             let lonely = nearNeighbors < 1.0; 
             
-            if ((overCrowded || lonely) && randomVal < 0.0005) {
-                newColor = 0.0; 
-            }
-            
-            // Random entropy death (Old Age)
-            if (randomVal > 0.99995) {
-                newColor = 0.0;
-            }
+            if ((overCrowded || lonely) && randomVal < 0.0005) { newColor = 0.0; }
+            if (randomVal > 0.99995) { newColor = 0.0; }
 
-            // 2. Refined Differentiation (Specialization)
             let diversity = foreignNeighbors / (nearNeighbors + 0.1);
-            
-            // Rule A: Structural Differentiation (Layering)
-            // Probability increases with Age, Crowd, and Purity (Monoculture)
-            // This encourages "skin" or "tissue" formation on mature clusters
             let ageFactor = smoothstep(2.0, 10.0, age);
             let crowdFactor = smoothstep(5.0, 25.0, nearNeighbors);
             let monocultureFactor = 1.0 - smoothstep(0.0, 0.2, diversity);
 
-            // Chance to evolve to next state
             let diffChance = 0.01 * ageFactor * crowdFactor * monocultureFactor;
-            
-            // Independent RNG for differentiation event
             let diffRng = fast_hash(vec2f(randomVal, age));
             
             if (diffRng < diffChance) {
                  let numTypes = u32(params.numTypes);
-                 // Cycle to next type to form ordered layers (Type A -> Type B)
                  let nextType = (myType % (numTypes - 1u)) + 1u;
                  newColor = f32(nextType);
-                 age = 0.0; // Reset age as new cell type
+                 age = 0.0; 
             }
 
-            // Rule B: Stress Mutation (Evolution)
-            // Cells in chaotic, high-diversity environments randomly mutate to find stability
             if (diversity > 0.6 && nearNeighbors > 10.0) {
                 let mutChance = fast_hash(vec2f(density, randomVal));
                 if (mutChance < 0.002) {
@@ -321,7 +263,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
             }
         }
 
-        // --- Physics Dynamics ---
         let crowding = smoothstep(5.0, 50.0, localDensity);
         var frict = params.friction;
         frict = mix(frict, frict * 0.5, crowding);
@@ -334,9 +275,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
 
         let fLen = length(force);
         let maxForce = 50.0; 
-        if (fLen > maxForce) {
-            force = (force / fLen) * maxForce;
-        }
+        if (fLen > maxForce) { force = (force / fLen) * maxForce; }
 
         vel += force * params.dt;
         vel *= frict; 
@@ -344,27 +283,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(local_invocati
         myPos = fract(myPos * 0.5 + 0.5) * 2.0 - 1.0;
         
         let typeChanged = abs(newColor - f32(myType)) > 0.1;
-
-        if (!typeChanged) {
-            age += params.dt;
-        } else {
-            age = 0.0; 
-        }
+        if (!typeChanged) { age += params.dt; } else { age = 0.0; }
         density = localDensity;
 
-        // --- Write Back ---
-        
-        // 1. Pack B (High Precision State)
         let newPackedB = vec4u(
-            pack2x16float(myPos),      // x: High Prec Pos
-            pack2x16float(vel),        // y: Velocity
-            pack2x16float(vec2f(density, age)), // z: State
-            0u                         // w: Pad
+            pack2x16float(myPos),      
+            pack2x16float(vel),        
+            pack2x16float(vec2f(density, age)), 
+            0u                         
         );
         particlesB[index] = newPackedB;
 
-        // 2. Pack A (Low Precision Neighbor Data)
-        // Map -1..1 to 0..1, then scale to 0..4095
         let normPos = clamp(myPos * 0.5 + 0.5, vec2f(0.0), vec2f(1.0));
         let uPos = vec2u(normPos * 4095.0);
         let uType = u32(newColor) & 0xFFu;
@@ -435,8 +364,8 @@ fn vs_main(
     let screenW = max(1.0, params.width);
     let screenH = max(1.0, params.height);
     
-    // Increased margin for culling to account for large glow fields
-    let maxParticleSizePx = params.size * 16.0; 
+    // Generous culling margin for large glow fields
+    let maxParticleSizePx = params.size * 20.0; 
     let maxExtentX = (maxParticleSizePx / screenW) * 2.0;
     let maxExtentY = (maxParticleSizePx / screenH) * 2.0;
     
@@ -451,10 +380,9 @@ fn vs_main(
     let colorData = colors[cType];
     
     var baseAlpha = 1.0;
-    if (cType == 0) { baseAlpha = 0.4; } 
+    if (cType == 0) { baseAlpha = 0.5; } 
     
-    // Grow in from 0 size
-    let growthFactor = smoothstep(0.0, 0.5, age);
+    let growthFactor = smoothstep(0.0, 0.4, age);
     let maxAlpha = params.opacity * colorData.a * baseAlpha * growthFactor;
     
     if (maxAlpha < 0.005) {
@@ -463,29 +391,18 @@ fn vs_main(
         return cullOut;
     }
 
-    // Velocity calculation for sizing
     let speed = length(vel);
 
-    // Adaptive Sizing Logic
-    // High density -> Larger size (merged blobs)
-    // High speed -> Larger size (motion blur effect)
-    let densityScale = smoothstep(5.0, 40.0, density); 
+    // Adaptive Sizing: Density makes them blobbier, Speed stretches them
+    let densityScale = smoothstep(5.0, 60.0, density); 
     let speedScale = smoothstep(0.2, 5.0, speed);
     
-    let adaptiveScale = 1.0 + (densityScale * 0.5) + (speedScale * 0.3);
+    let adaptiveScale = 1.0 + (densityScale * 0.8) + (speedScale * 0.2);
 
-    // Determine visual radius based on alpha to optimize fill rate
     let safeAlpha = max(maxAlpha, 0.001);
-    let visibleRadius = clamp(1.5 - pow(0.01 / safeAlpha, 0.5), 0.6, 2.0);
+    let visibleRadius = clamp(1.8 - pow(0.01 / safeAlpha, 0.5), 0.8, 2.5);
 
-    // Quad size calculation
     let quadSizePx = params.size * 6.0 * growthFactor * visibleRadius * adaptiveScale;
-    
-    if (quadSizePx < 0.5) {
-        var cullOut: VertexOutput;
-        cullOut.position = vec4f(-2.0, -2.0, 2.0, 1.0);
-        return cullOut;
-    }
     
     var offsets = array<vec2f, 6>(
         vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
@@ -493,14 +410,13 @@ fn vs_main(
     );
     let rawOffset = offsets[vIdx]; 
     
-    // Stretch along velocity vector
     var dir = vec2f(1.0, 0.0);
     if (speed > 0.001) {
         dir = vel / speed;
     }
     let perp = vec2f(-dir.y, dir.x);
     
-    let stretch = clamp(1.0 + speed * 1.5, 1.0, 3.0);
+    let stretch = clamp(1.0 + speed * 2.0, 1.0, 4.0);
     let squash = 1.0 / sqrt(stretch); 
     
     let rotOffset = (dir * rawOffset.x * stretch) + (perp * rawOffset.y * squash);
@@ -508,7 +424,6 @@ fn vs_main(
 
     let offsetNDC = finalOffsetPx * vec2f(2.0 / screenW, 2.0 / screenH);
     
-    // Generate stable random variation based on index
     let vary = fract(sin(f32(iIdx) * 12.9898) * 43758.5453);
 
     var output: VertexOutput;
@@ -537,7 +452,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let uv = input.uv;
     let distSq = dot(uv, uv);
     
-    if (distSq > 2.5) { discard; }
+    if (distSq > 4.0) { discard; }
 
     let r = sqrt(distSq);
     let density = input.extra.x;
@@ -547,73 +462,74 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let baseColor = input.color.rgb;
     let baseAlpha = input.color.a;
 
-    // --- Color Interpolation & Differentiation ---
+    // --- Dynamic Color Dynamics ---
     
-    // 1. Per-Particle Variation (Sub-types)
-    // Slight hue/brightness shift to distinguish individual cells
-    let hueVar = (vary - 0.5) * 0.15; // +/- 0.075 radians (~4 degrees)
+    // Sub-type variation
+    let hueVar = (vary - 0.5) * 0.1;
     var distinctColor = hueShift(baseColor, hueVar);
     
-    // 2. Density-based Hue Shift (Stress)
-    // High density -> Shift hue slightly to indicate pressure/heat
-    // Use density to shift towards "hotter" or "colder" depending on logic
+    // Stress Shift (Pressure/Heat)
     let stress = smoothstep(5.0, 50.0, density);
-    let stressHue = stress * 0.5; // Up to ~30 degrees shift
+    let stressHue = stress * 0.6; 
     distinctColor = hueShift(distinctColor, stressHue);
 
-    // 3. Lifecycle Gradient (Age)
-    // Birth: White/Bright -> Middle: Pure Color -> Old: Darker/Desaturated
+    // Lifecycle
     var lifeColor = distinctColor;
     if (age < 0.5) {
-        // Birth transition: White -> Color
         let t = smoothstep(0.0, 0.5, age);
         lifeColor = mix(vec3f(1.0, 1.0, 1.0), distinctColor, t);
-    } else if (age > 5.0) {
-        // Old age: Darkening
-        let t = smoothstep(5.0, 20.0, age);
-        lifeColor = mix(distinctColor, distinctColor * 0.7, t); 
+    } else if (age > 8.0) {
+        let t = smoothstep(8.0, 25.0, age);
+        lifeColor = mix(distinctColor, distinctColor * 0.5, t); 
     }
 
-    // --- Bioelectric Field Simulation ---
+    // --- Bioelectric Plasma Field ---
 
-    // Energy Calculation
-    let kinetic = smoothstep(0.0, 5.0, speed);
-    let totalEnergy = clamp(stress + kinetic * 0.4, 0.0, 1.0);
+    let kinetic = smoothstep(0.0, 6.0, speed);
+    let totalEnergy = clamp(stress + kinetic * 0.5, 0.0, 1.0);
 
-    // Dynamic Pulsing
-    let time = params.time;
-    let pulseFreq = 2.0 + (totalEnergy * 10.0);
-    // Add phase offset based on vary to desynchronize pulses
-    let ripple = sin(time * pulseFreq - r * 6.0 + vary * 6.28);
-    let pulseIntensity = 0.8 + 0.2 * ripple;
-
-    // Structural Layers
-    let coreRadius = 0.35 + (stress * 0.1); 
-    let coreShape = smoothstep(coreRadius + 0.1, coreRadius - 0.1, r);
-    let fieldIntensity = exp(-r * (2.5 - stress)) * 0.8;
-    let spark = smoothstep(0.1, 0.0, r);
-
-    // Electric Tint Mixing
-    // Mix with a high-energy tint (Cyan/White)
-    let electricTint = vec3f(0.6, 0.9, 1.0); 
-    let colorMix = smoothstep(0.3, 0.9, totalEnergy);
-    let activeColor = mix(lifeColor, electricTint, colorMix * 0.6);
+    // High frequency electric noise
+    let noise = fract(sin(dot(uv + vec2f(params.time * 2.0), vec2f(12.9898, 78.233))) * 43758.5453);
     
-    // Final Composition
+    // Pulsing field
+    let time = params.time;
+    let pulseFreq = 1.5 + (totalEnergy * 15.0);
+    let ripple = sin(time * pulseFreq - r * 8.0 + vary * 10.0);
+    // Sharper electric pulses
+    let pulseIntensity = 0.8 + 0.3 * ripple * (0.5 + 0.5 * noise);
+
+    // Core Structure
+    let coreRadius = 0.3 + (stress * 0.15); 
+    let coreShape = smoothstep(coreRadius + 0.1, coreRadius - 0.05, r);
+    
+    // Outer Plasma Field (Exponential decay + slight noise grain)
+    let fieldIntensity = exp(-r * (2.2 - stress * 0.5)) * 0.9;
+    
+    // Bright hot center
+    let spark = smoothstep(0.12, 0.0, r);
+
+    // Electric Cyan/White Tint for high energy
+    let electricTint = vec3f(0.7, 0.95, 1.0); 
+    let colorMix = smoothstep(0.2, 0.95, totalEnergy);
+    
+    // Final Color Mixing
+    let activeColor = mix(lifeColor, electricTint, colorMix * 0.8);
     var color = activeColor * coreShape; 
     
-    // Glow uses the lifeColor to maintain identity, mixed with energy
-    let glowColor = mix(lifeColor, electricTint, 0.5);
-    color += glowColor * fieldIntensity * pulseIntensity * (0.5 + totalEnergy);
+    let glowColor = mix(lifeColor, electricTint, 0.4 + colorMix * 0.4);
+    color += glowColor * fieldIntensity * pulseIntensity * (0.6 + totalEnergy);
     
-    color += vec3f(1.0) * spark * 0.9;
+    color += vec3f(1.0) * spark * (0.8 + 0.2 * noise);
     
     // Alpha Composition
-    let shapeAlpha = coreShape + (fieldIntensity * 0.5);
+    let shapeAlpha = coreShape + (fieldIntensity * 0.6);
     var alpha = params.opacity * baseAlpha * shapeAlpha;
     
-    alpha *= (0.7 + 0.6 * totalEnergy);
-    alpha *= smoothstep(1.6, 0.5, r);
+    // Energy boosts visibility
+    alpha *= (0.8 + 0.5 * totalEnergy);
+    
+    // Soft circular crop
+    alpha *= smoothstep(2.0, 1.0, r);
 
     if (alpha < 0.005) { discard; }
 
